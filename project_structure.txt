@@ -1,0 +1,116 @@
+Project Structure:
+
+Root Folder:
+- .gitignore
+- docker-compose.yml
+- README.md
+- project-structure.txt
+
+Frontend:
+- .env
+- .gitignore
+- Dockerfile
+- eslint.config.mjs
+- next-env.d.ts
+- next.config.ts
+- package.json
+- postcss.config.mjs
+- README.md
+- tsconfig.json
+- .next/
+  - app-build-manifest.json
+  - build-manifest.json
+  - package.json
+  - prerender-manifest.json
+  - react-loadable-manifest.json
+  - routes-manifest.json
+  - trace
+  - cache/
+    - .rscinfo
+    - chrome-devtools-workspace-uuid
+    - next-devtools-config.json
+    - swc/
+      - plugins/
+        - windows_x86_64_18.0.0/
+    - webpack/
+      - client-development/
+      - server-development/
+  - server/
+    - app-paths-manifest.json
+    - interception-route-rewrite-manifest.js
+    - middleware-build-manifest.js
+    - middleware-manifest.json
+    - middleware-react-loadable-manifest.js
+    - next-font-manifest.js
+    - next-font-manifest.json
+    - pages-manifest.json
+    - server-reference-manifest.js
+    - server-reference-manifest.json
+    - webpack-runtime.js
+  - static/
+    - chunks/
+    - css/
+    - development/
+    - media/
+    - webpack/
+  - types/
+    - cache-life.d.ts
+    - package.json
+    - routes.d.ts
+    - validator.ts
+  - public/
+    - file.svg
+    - globe.svg
+    - next.svg
+    - vercel.svg
+    - window.svg
+  - src/
+    - app/
+      - favicon.ico
+      - globals.css
+      - layout.tsx
+      - page.tsx
+      - api/
+        - auth/
+      - dashboard/
+        - page.tsx
+      - login/
+        - page.tsx
+      - signup/
+        - page.tsx
+
+Backend:
+- .env
+- alembic.ini
+- Dockerfile
+- init_db.py
+- requirements.txt
+- __pycache__/
+  - database.cpython-313.pyc
+  - init_db.cpython-313.pyc
+  - main.cpython-313.pyc
+  - models.cpython-313.pyc
+- alembic/
+  - env.py
+  - README
+  - script.py.mako
+  - __pycache__/
+    - env.cpython-313.pyc
+  - versions/
+    - 1d4d8e5d1758_add_new_columns_to_user_table.py
+    - __pycache__/
+      - 1d4d8e5d1758_add_new_columns_to_user_table.cpython-313.pyc
+- app/
+  - __init__.py
+  - auth.py
+  - database.py
+  - main.py
+  - models.py
+  - schemas.py
+  - __pycache__/
+    - __init__.cpython-313.pyc
+    - auth.cpython-313.pyc
+    - database.cpython-313.pyc
+    - main.cpython-313.pyc
+    - models.cpython-313.pyc
+    - schemas.cpython-313.pyc

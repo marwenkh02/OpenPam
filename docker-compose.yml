@@ -10,6 +10,8 @@ services:
       - ./backend:/app
     depends_on:
       - db
+    environment:
+      - ENVIRONMENT=development
 
   frontend:
     build: ./frontend
@@ -18,8 +20,13 @@ services:
       - "3000:3000"
     volumes:
       - ./frontend:/app
+      - /app/node_modules
     stdin_open: true
     tty: true
+    environment:
+      - NODE_ENV=development
+    depends_on:
+      - backend
 
   db:
     image: postgres:15
