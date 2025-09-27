@@ -6,11 +6,10 @@ import logging
 from jose import JWTError, jwt
 
 from .database import SessionLocal, engine, get_db
-from .models import User, Base, AccessRequest, Resource
+from .models import User, Base
 from .schemas import (
     UserCreate, UserResponse, Token, LoginRequest, 
-    MFAEnableRequest, MFAResponse, PasswordChangeRequest,
-    AccessRequestCreate, AccessRequestResponse
+    MFAEnableRequest, MFAResponse, PasswordChangeRequest
 )
 from .auth import (
     get_password_hash, authenticate_user, 
@@ -242,44 +241,7 @@ def change_password(
     
     return {"message": "Password changed successfully"}
 
-@app.post("/access-requests/", response_model=AccessRequestResponse)
-def create_access_request(
-    request_data: AccessRequestCreate,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    # Check if resource exists
-    resource = db.query(Resource).filter(Resource.id == request_data.resource_id).first()
-    if not resource:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Resource not found"
-        )
-    
-    # Create access request
-    access_request = AccessRequest(
-        user_id=current_user.id,
-        resource_id=request_data.resource_id,
-        reason=request_data.reason,
-        expires_at=datetime.utcnow() + timedelta(minutes=request_data.duration_minutes)
-    )
-    
-    db.add(access_request)
-    db.commit()
-    db.refresh(access_request)
-    
-    return access_request
-
-@app.get("/access-requests/", response_model=list[AccessRequestResponse])
-def get_access_requests(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    if current_user.is_admin:
-        access_requests = db.query(AccessRequest).all()
-    else:
-        access_requests = db.query(AccessRequest).filter(
-            AccessRequest.user_id == current_user.id
-        ).all()
-    
-    return access_requests
+# Health check endpoint
+@app.get("/health")
+def health_check():
+    return {"status": "healthy", "timestamp": datetime.utcnow()}

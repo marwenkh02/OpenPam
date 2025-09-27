@@ -40,6 +40,7 @@ class UserResponse(BaseModel):
     job_title: Optional[str]
     access_level: int
     must_change_password: bool
+    role_id: Optional[int]
 
     class Config:
         from_attributes = True
@@ -85,20 +86,35 @@ class PasswordChangeRequest(BaseModel):
             raise ValueError("; ".join(errors))
         return v
 
-class AccessRequestCreate(BaseModel):
-    resource_id: int
-    reason: str
-    duration_minutes: int = 60
+# Basic schemas for new entities (will be extended as needed)
+class RoleCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
 
-class AccessRequestResponse(BaseModel):
+class RoleResponse(BaseModel):
     id: int
-    user_id: int
-    resource_id: int
-    reason: str
-    status: str
-    requested_at: datetime
-    approved_at: Optional[datetime]
-    expires_at: datetime
+    name: str
+    description: Optional[str]
+
+    class Config:
+        from_attributes = True
+
+class ResourceCreate(BaseModel):
+    name: str
+    type: str
+    hostname: str
+    port: Optional[int] = None
+    description: Optional[str] = None
+    criticality: str = "medium"
+
+class ResourceResponse(BaseModel):
+    id: int
+    name: str
+    type: str
+    hostname: str
+    port: Optional[int]
+    description: Optional[str]
+    criticality: str
 
     class Config:
         from_attributes = True
