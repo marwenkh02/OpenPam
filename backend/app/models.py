@@ -1,7 +1,25 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, JSON, ForeignKey, Text
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, JSON, ForeignKey, Text, Text
 from sqlalchemy.orm import relationship
 from .database import Base
 from datetime import datetime
+import enum
+
+class AuditActionType(enum.Enum):
+    LOGIN = "login"
+    LOGOUT = "logout"
+    LOGIN_FAILED = "login_failed"
+    CREATE_REQUEST = "create_request"
+    APPROVE_REQUEST = "approve_request"
+    REJECT_REQUEST = "reject_request"
+    REQUEST_EXPIRED = "request_expired"
+    PASSWORD_CHANGE = "password_change"
+    MFA_ENABLED = "mfa_enabled"
+    MFA_DISABLED = "mfa_disabled"
+    PROFILE_UPDATE = "profile_update"
+    SESSION_START = "session_start"
+    SESSION_END = "session_end"
+    ACCESS_GRANTED = "access_granted"
+    ACCESS_REVOKED = "access_revoked"
 
 class Role(Base):
     __tablename__ = "roles"
@@ -42,7 +60,8 @@ class User(Base):
     access_requests = relationship("AccessRequest", back_populates="user", foreign_keys="AccessRequest.user_id")
     approved_requests = relationship("AccessRequest", back_populates="approver", foreign_keys="AccessRequest.approved_by")
     sessions = relationship("UserSession", back_populates="user")
-    audit_logs = relationship("AuditLog", back_populates="user")
+    audit_logs = relationship("AuditLog", back_populates="user", foreign_keys="AuditLog.user_id")
+    admin_audit_logs = relationship("AuditLog", back_populates="admin_user", foreign_keys="AuditLog.admin_user_id")
     rotation_history = relationship("RotationHistory", back_populates="user")
 
 class UserSession(Base):
@@ -138,14 +157,22 @@ class AuditLog(Base):
     __tablename__ = "audit_logs"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"))
-    action = Column(String, nullable=False)  # "login", "create_request", "approve_request", "rotate_credential"
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # User who performed the action
+    admin_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # Admin who performed admin action
+    action = Column(String, nullable=False)  # "login", "create_request", "approve_request", etc.
+    action_type = Column(String, nullable=False)  # From AuditActionType enum
     details = Column(JSON, nullable=True)
+    ip_address = Column(String, nullable=True)
+    user_agent = Column(String, nullable=True)
     timestamp = Column(DateTime, default=datetime.utcnow)
     access_request_id = Column(Integer, ForeignKey("access_requests.id"), nullable=True)
+    resource_id = Column(Integer, ForeignKey("resources.id"), nullable=True)
+    severity = Column(String, default="info")  # info, warning, critical
 
-    user = relationship("User", back_populates="audit_logs")
+    user = relationship("User", back_populates="audit_logs", foreign_keys=[user_id])
+    admin_user = relationship("User", back_populates="admin_audit_logs", foreign_keys=[admin_user_id])
     access_request = relationship("AccessRequest", back_populates="audit_logs")
+    resource = relationship("Resource")
 
 class RotationHistory(Base):
     __tablename__ = "rotation_history"

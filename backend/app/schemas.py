@@ -1,5 +1,5 @@
 from pydantic import BaseModel, EmailStr, validator, Field
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 from enum import Enum
 
@@ -153,7 +153,40 @@ class RoleResponse(BaseModel):
     class Config:
         from_attributes = True
 
+# Audit Log Schemas
+class AuditLogResponse(BaseModel):
+    id: int
+    user_id: Optional[int]
+    admin_user_id: Optional[int]
+    action: str
+    action_type: str
+    details: Optional[Dict[str, Any]]
+    ip_address: Optional[str]
+    user_agent: Optional[str]
+    timestamp: datetime
+    access_request_id: Optional[int]
+    resource_id: Optional[int]
+    severity: str
+    user: Optional["UserResponse"] = None
+    admin_user: Optional["UserResponse"] = None
+    access_request: Optional["AccessRequestResponse"] = None
+    resource: Optional["ResourceResponse"] = None
+
+    class Config:
+        from_attributes = True
+
+class AuditLogFilter(BaseModel):
+    user_id: Optional[int] = None
+    action_type: Optional[str] = None
+    severity: Optional[str] = None
+    start_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None
+    resource_id: Optional[int] = None
+    limit: int = 100
+    offset: int = 0
+
 # Update forward references
 AccessRequestResponse.update_forward_refs()
 ResourceResponse.update_forward_refs()
 UserResponse.update_forward_refs()
+AuditLogResponse.update_forward_refs()
