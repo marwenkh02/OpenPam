@@ -1,6 +1,7 @@
 from pydantic import BaseModel, EmailStr, validator, Field
 from typing import Optional, List
 from datetime import datetime
+from enum import Enum
 
 class UserCreate(BaseModel):
     username: str = Field(..., min_length=3, max_length=50)
@@ -86,19 +87,39 @@ class PasswordChangeRequest(BaseModel):
             raise ValueError("; ".join(errors))
         return v
 
-# Basic schemas for new entities (will be extended as needed)
-class RoleCreate(BaseModel):
-    name: str
-    description: Optional[str] = None
+# Access Request Schemas
+class AccessRequestStatus(str, Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
 
-class RoleResponse(BaseModel):
+class AccessRequestCreate(BaseModel):
+    resource_id: int
+    reason: Optional[str] = None
+    expires_at: datetime = Field(..., description="Requested expiry time")
+
+class AccessRequestResponse(BaseModel):
     id: int
-    name: str
-    description: Optional[str]
+    user_id: int
+    resource_id: int
+    reason: Optional[str]
+    status: str
+    requested_at: datetime
+    approved_at: Optional[datetime]
+    approved_by: Optional[int]
+    expires_at: datetime
+    user: Optional["UserResponse"] = None
+    resource: Optional["ResourceResponse"] = None
+    approver: Optional["UserResponse"] = None
 
     class Config:
         from_attributes = True
 
+class AccessRequestUpdate(BaseModel):
+    status: AccessRequestStatus
+
+# Resource Schemas
 class ResourceCreate(BaseModel):
     name: str
     type: str
@@ -118,3 +139,21 @@ class ResourceResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+# Role Schemas
+class RoleCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+
+class RoleResponse(BaseModel):
+    id: int
+    name: str
+    description: Optional[str]
+
+    class Config:
+        from_attributes = True
+
+# Update forward references
+AccessRequestResponse.update_forward_refs()
+ResourceResponse.update_forward_refs()
+UserResponse.update_forward_refs()

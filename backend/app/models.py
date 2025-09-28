@@ -93,8 +93,8 @@ class AccessRequest(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"))
     resource_id = Column(Integer, ForeignKey("resources.id"))
-    reason = Column(String)
-    status = Column(String, default="pending")  # pending, approved, rejected
+    reason = Column(Text, nullable=True)
+    status = Column(String, default="pending")  # pending, approved, rejected, expired
     requested_at = Column(DateTime, default=datetime.utcnow)
     approved_at = Column(DateTime, nullable=True)
     approved_by = Column(Integer, ForeignKey("users.id"), nullable=True)

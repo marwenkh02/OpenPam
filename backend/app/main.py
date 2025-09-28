@@ -1,15 +1,18 @@
-from fastapi import FastAPI, Depends, HTTPException, status, Request
+from fastapi import FastAPI, Depends, HTTPException, status, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from datetime import datetime, timedelta
 import logging
 from jose import JWTError, jwt
+from typing import List
 
 from .database import SessionLocal, engine, get_db
-from .models import User, Base
+from .models import User, Base, AccessRequest, Resource, AuditLog
 from .schemas import (
     UserCreate, UserResponse, Token, LoginRequest, 
-    MFAEnableRequest, MFAResponse, PasswordChangeRequest
+    MFAEnableRequest, MFAResponse, PasswordChangeRequest,
+    AccessRequestCreate, AccessRequestResponse, AccessRequestUpdate,
+    ResourceCreate, ResourceResponse
 )
 from .auth import (
     get_password_hash, authenticate_user, 
@@ -42,6 +45,7 @@ Base.metadata.create_all(bind=engine)
 async def root():
     return {"message": "OpenPAM API is running"}
 
+# User Management Endpoints
 @app.post("/users/", response_model=UserResponse)
 def create_user(user_data: UserCreate, db: Session = Depends(get_db)):
     # Check if user already exists
@@ -76,6 +80,7 @@ def get_users(
     users = db.query(User).all()
     return users
 
+# Authentication Endpoints
 @app.post("/token", response_model=Token)
 def login_for_access_token(
     request: Request,
@@ -90,6 +95,7 @@ def login_for_access_token(
             return {
                 "access_token": "",
                 "refresh_token": "",
+                "token_type": "bearer",
                 "mfa_required": True
             }
         
@@ -161,6 +167,7 @@ def refresh_token(
 def read_users_me(current_user: User = Depends(get_current_user)):
     return current_user
 
+# MFA Endpoints
 @app.post("/users/me/mfa/enable", response_model=MFAResponse)
 def enable_mfa(
     current_user: User = Depends(get_current_user),
@@ -240,6 +247,237 @@ def change_password(
     db.commit()
     
     return {"message": "Password changed successfully"}
+
+# Resource Management Endpoints
+@app.post("/resources/", response_model=ResourceResponse)
+def create_resource(
+    resource_data: ResourceCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user)
+):
+    resource = Resource(**resource_data.dict())
+    db.add(resource)
+    db.commit()
+    db.refresh(resource)
+    return resource
+
+@app.get("/resources/", response_model=List[ResourceResponse])
+def get_resources(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    resources = db.query(Resource).all()
+    return resources
+
+# Access Request Endpoints
+@app.post("/access-requests/", response_model=AccessRequestResponse)
+def create_access_request(
+    request_data: AccessRequestCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    # Validate resource exists
+    resource = db.query(Resource).filter(Resource.id == request_data.resource_id).first()
+    if not resource:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Resource not found"
+        )
+    
+    # Validate expiry time (max 24 hours)
+    max_expiry = datetime.utcnow() + timedelta(hours=24)
+    if request_data.expires_at > max_expiry:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Access duration cannot exceed 24 hours"
+        )
+    
+    # Create access request
+    access_request = AccessRequest(
+        user_id=current_user.id,
+        resource_id=request_data.resource_id,
+        reason=request_data.reason,
+        expires_at=request_data.expires_at,
+        status="pending"
+    )
+    
+    db.add(access_request)
+    db.commit()
+    db.refresh(access_request)
+    
+    # Create audit log
+    audit_log = AuditLog(
+        user_id=current_user.id,
+        action="create_request",
+        details={
+            "resource_id": request_data.resource_id,
+            "resource_name": resource.name,
+            "expires_at": request_data.expires_at.isoformat()
+        },
+        access_request_id=access_request.id
+    )
+    db.add(audit_log)
+    db.commit()
+    
+    return access_request
+
+@app.get("/access-requests/my-requests", response_model=List[AccessRequestResponse])
+def get_my_access_requests(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get only the current user's access requests with resource and user details"""
+    requests = db.query(AccessRequest).options(
+        joinedload(AccessRequest.resource),
+        joinedload(AccessRequest.user)
+    ).filter(
+        AccessRequest.user_id == current_user.id
+    ).order_by(AccessRequest.requested_at.desc()).all()
+    
+    return requests
+
+@app.get("/access-requests/", response_model=List[AccessRequestResponse])
+def get_all_access_requests(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user)
+):
+    """Get all access requests (admin only) with resource and user details"""
+    requests = db.query(AccessRequest).options(
+        joinedload(AccessRequest.resource),
+        joinedload(AccessRequest.user),
+        joinedload(AccessRequest.approver)
+    ).order_by(AccessRequest.requested_at.desc()).all()
+    return requests
+
+@app.get("/access-requests/pending", response_model=List[AccessRequestResponse])
+def get_pending_access_requests(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user)
+):
+    """Get pending access requests for admin approval with resource and user details"""
+    requests = db.query(AccessRequest).options(
+        joinedload(AccessRequest.resource),
+        joinedload(AccessRequest.user)
+    ).filter(
+        AccessRequest.status == "pending"
+    ).order_by(AccessRequest.requested_at.desc()).all()
+    return requests
+
+@app.post("/access-requests/{request_id}/approve", response_model=AccessRequestResponse)
+def approve_access_request(
+    request_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user)
+):
+    access_request = db.query(AccessRequest).filter(AccessRequest.id == request_id).first()
+    if not access_request:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Access request not found"
+        )
+    
+    if access_request.status != "pending":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Access request is not pending"
+        )
+    
+    # Update access request
+    access_request.status = "approved"
+    access_request.approved_at = datetime.utcnow()
+    access_request.approved_by = current_user.id
+    db.commit()
+    db.refresh(access_request)
+    
+    # Create audit log
+    audit_log = AuditLog(
+        user_id=current_user.id,
+        action="approve_request",
+        details={
+            "request_id": request_id,
+            "approved_by": current_user.username
+        },
+        access_request_id=access_request.id
+    )
+    db.add(audit_log)
+    db.commit()
+    
+    return access_request
+
+@app.post("/access-requests/{request_id}/reject", response_model=AccessRequestResponse)
+def reject_access_request(
+    request_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user)
+):
+    access_request = db.query(AccessRequest).filter(AccessRequest.id == request_id).first()
+    if not access_request:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Access request not found"
+        )
+    
+    if access_request.status != "pending":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Access request is not pending"
+        )
+    
+    # Update access request
+    access_request.status = "rejected"
+    access_request.approved_at = datetime.utcnow()
+    access_request.approved_by = current_user.id
+    db.commit()
+    db.refresh(access_request)
+    
+    # Create audit log
+    audit_log = AuditLog(
+        user_id=current_user.id,
+        action="reject_request",
+        details={
+            "request_id": request_id,
+            "rejected_by": current_user.username
+        },
+        access_request_id=access_request.id
+    )
+    db.add(audit_log)
+    db.commit()
+    
+    return access_request
+
+# Background task to expire access requests
+def expire_access_requests(db: Session):
+    """Expire access requests that have passed their expiry time"""
+    expired_requests = db.query(AccessRequest).filter(
+        AccessRequest.status == "approved",
+        AccessRequest.expires_at < datetime.utcnow()
+    ).all()
+    
+    for request in expired_requests:
+        request.status = "expired"
+        # Create audit log for expiration
+        audit_log = AuditLog(
+            user_id=request.user_id,
+            action="request_expired",
+            details={
+                "request_id": request.id,
+                "expired_at": datetime.utcnow().isoformat()
+            },
+            access_request_id=request.id
+        )
+        db.add(audit_log)
+    
+    db.commit()
+
+@app.post("/access-requests/expire")
+def trigger_expire_access_requests(
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user)
+):
+    """Manually trigger expiration of access requests (for testing)"""
+    background_tasks.add_task(expire_access_requests, db)
+    return {"message": "Expiration process started"}
 
 # Health check endpoint
 @app.get("/health")
