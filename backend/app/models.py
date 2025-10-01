@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, JSON, ForeignKey, Text, Text
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, JSON, ForeignKey, Text, Enum as SQLEnum
 from sqlalchemy.orm import relationship
 from .database import Base
 from datetime import datetime
@@ -20,6 +20,23 @@ class AuditActionType(enum.Enum):
     SESSION_END = "session_end"
     ACCESS_GRANTED = "access_granted"
     ACCESS_REVOKED = "access_revoked"
+    RESOURCE_CREATE = "resource_create"
+    RESOURCE_UPDATE = "resource_update"
+    RESOURCE_DELETE = "resource_delete"
+    HEALTH_CHECK = "health_check"
+
+class ResourceType(enum.Enum):
+    SSH = "ssh"
+    DB = "db"
+    API = "api"
+    WEB = "web"
+    RDP = "rdp"
+    SERVICE = "service"
+
+class CriticalityLevel(enum.Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
 
 class Role(Base):
     __tablename__ = "roles"
@@ -82,16 +99,35 @@ class Resource(Base):
     __tablename__ = "resources"
     
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, nullable=False)
+    name = Column(String, nullable=False, unique=True)
     type = Column(String, nullable=False)  # ssh, db, api, etc.
     hostname = Column(String, nullable=False)
     port = Column(Integer, nullable=True)
     description = Column(String, nullable=True)
     criticality = Column(String, default="medium")  # low, medium, high
+    is_active = Column(Boolean, default=True)
+    
+    # New health monitoring fields
+    is_online = Column(Boolean, default=False)
+    last_checked_at = Column(DateTime, nullable=True)
+    check_interval = Column(Integer, default=300)  # 5 minutes in seconds
     
     access_requests = relationship("AccessRequest", back_populates="resource")
     credentials = relationship("Credential", back_populates="resource")
     recorded_sessions = relationship("RecordedSession", back_populates="resource")
+    resource_checks = relationship("ResourceCheck", back_populates="resource")
+
+class ResourceCheck(Base):
+    __tablename__ = "resource_checks"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    resource_id = Column(Integer, ForeignKey("resources.id"))
+    checked_at = Column(DateTime, default=datetime.utcnow)
+    is_online = Column(Boolean, default=False)
+    response_time = Column(Integer, nullable=True)  # milliseconds
+    error_message = Column(String, nullable=True)
+    
+    resource = relationship("Resource", back_populates="resource_checks")
 
 class Credential(Base):
     __tablename__ = "credentials"

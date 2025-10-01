@@ -120,13 +120,43 @@ class AccessRequestUpdate(BaseModel):
     status: AccessRequestStatus
 
 # Resource Schemas
+class ResourceType(str, Enum):
+    SSH = "ssh"
+    DB = "db"
+    API = "api"
+    WEB = "web"
+    RDP = "rdp"
+    SERVICE = "service"
+
+class CriticalityLevel(str, Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
 class ResourceCreate(BaseModel):
-    name: str
-    type: str
-    hostname: str
-    port: Optional[int] = None
+    name: str = Field(..., min_length=3, max_length=100)
+    type: ResourceType
+    hostname: str = Field(..., min_length=1)
+    port: Optional[int] = Field(None, ge=1, le=65535)
     description: Optional[str] = None
-    criticality: str = "medium"
+    criticality: CriticalityLevel = CriticalityLevel.MEDIUM
+    check_interval: Optional[int] = Field(300, ge=60, description="Health check interval in seconds (minimum 60)")
+
+    @validator('hostname')
+    def validate_hostname(cls, v):
+        # Basic hostname/IP validation
+        if not v or len(v.strip()) == 0:
+            raise ValueError('hostname cannot be empty')
+        return v
+
+class ResourceUpdate(BaseModel):
+    name: Optional[str] = Field(None, min_length=3, max_length=100)
+    type: Optional[ResourceType] = None
+    hostname: Optional[str] = Field(None, min_length=1)
+    port: Optional[int] = Field(None, ge=1, le=65535)
+    description: Optional[str] = None
+    criticality: Optional[CriticalityLevel] = None
+    check_interval: Optional[int] = Field(None, ge=60, description="Health check interval in seconds (minimum 60)")
 
 class ResourceResponse(BaseModel):
     id: int
@@ -136,9 +166,51 @@ class ResourceResponse(BaseModel):
     port: Optional[int]
     description: Optional[str]
     criticality: str
+    is_active: bool
+    is_online: bool
+    last_checked_at: Optional[datetime]
+    check_interval: int
 
     class Config:
         from_attributes = True
+
+class ResourceListResponse(BaseModel):
+    items: List[ResourceResponse]
+    meta: Dict[str, Any]
+
+class DeleteResourceResponse(BaseModel):
+    message: str
+    details: Optional[Dict[str, Any]] = None
+
+# Health Check Schemas
+class ResourceCheckResponse(BaseModel):
+    id: int
+    resource_id: int
+    checked_at: datetime
+    is_online: bool
+    response_time: Optional[int]
+    error_message: Optional[str]
+    resource: Optional["ResourceResponse"] = None
+
+    class Config:
+        from_attributes = True
+
+class HealthCheckResponse(BaseModel):
+    resource_id: int
+    is_online: bool
+    response_time: Optional[int]
+    error_message: Optional[str]
+    checked_at: datetime
+
+class BulkHealthCheckResponse(BaseModel):
+    results: List[HealthCheckResponse]
+    total_checked: int
+    online_count: int
+    offline_count: int
+
+class HealthCheckRequest(BaseModel):
+    resource_ids: Optional[List[int]] = None
+    force_check: bool = False
 
 # Role Schemas
 class RoleCreate(BaseModel):
@@ -190,3 +262,4 @@ AccessRequestResponse.update_forward_refs()
 ResourceResponse.update_forward_refs()
 UserResponse.update_forward_refs()
 AuditLogResponse.update_forward_refs()
+ResourceCheckResponse.update_forward_refs()

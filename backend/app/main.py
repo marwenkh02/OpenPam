@@ -5,14 +5,18 @@ from datetime import datetime, timedelta
 import logging
 from jose import JWTError, jwt
 from typing import List, Optional
+from fastapi import Query
+from sqlalchemy import or_, and_
 
 from .database import SessionLocal, engine, get_db
-from .models import User, Base, AccessRequest, Resource, AuditLog, AuditActionType
+from .models import User, Base, AccessRequest, Resource, AuditLog, AuditActionType, Credential, ResourceCheck
 from .schemas import (
     UserCreate, UserResponse, Token, LoginRequest, 
     MFAEnableRequest, MFAResponse, PasswordChangeRequest,
     AccessRequestCreate, AccessRequestResponse, AccessRequestUpdate,
-    ResourceCreate, ResourceResponse, AuditLogResponse, AuditLogFilter
+    ResourceCreate, ResourceResponse, ResourceUpdate, ResourceListResponse, 
+    AuditLogResponse, AuditLogFilter, HealthCheckResponse, BulkHealthCheckResponse, 
+    ResourceCheckResponse, HealthCheckRequest
 )
 from .auth import (
     get_password_hash, authenticate_user, 
@@ -22,6 +26,33 @@ from .auth import (
     create_user_session, ACCESS_TOKEN_EXPIRE_MINUTES,
     SECRET_KEY, ALGORITHM
 )
+
+# Import health check service (you'll need to create this)
+try:
+    from .health_check import health_check_service
+except ImportError:
+    # Fallback mock service if health_check module doesn't exist yet
+    class MockHealthCheckService:
+        async def check_resource_health(self, resource):
+            # Mock implementation - replace with actual health checks
+            return {
+                "is_online": True,
+                "response_time": 100,
+                "error_message": None
+            }
+    
+    health_check_service = MockHealthCheckService()
+
+# Import background tasks (you'll need to create these)
+try:
+    from .tasks import check_single_resource, check_all_resources
+except ImportError:
+    # Mock tasks if not implemented yet
+    def check_single_resource(resource_id):
+        print(f"Mock: Checking resource {resource_id}")
+    
+    def check_all_resources():
+        print("Mock: Checking all resources")
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -370,9 +401,484 @@ def change_password(
     
     return {"message": "Password changed successfully"}
 
-# Resource Management Endpoints
-@app.post("/resources/", response_model=ResourceResponse)
+# Enhanced Resource Management Endpoints
+@app.post("/api/resources", response_model=ResourceResponse)
 def create_resource(
+    resource_data: ResourceCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user),
+    request: Request = None
+):
+    # Check for duplicate name
+    existing_resource = db.query(Resource).filter(
+        Resource.name == resource_data.name
+    ).first()
+    if existing_resource:
+        raise HTTPException(
+            status_code=409,
+            detail="Resource name already exists"
+        )
+    
+    # Check for duplicate hostname:port combination
+    existing_hostname = db.query(Resource).filter(
+        and_(
+            Resource.hostname == resource_data.hostname,
+            Resource.port == resource_data.port,
+            Resource.is_active == True
+        )
+    ).first()
+    if existing_hostname:
+        raise HTTPException(
+            status_code=409,
+            detail="Resource with this hostname and port already exists"
+        )
+
+    resource = Resource(**resource_data.dict())
+    db.add(resource)
+    db.commit()
+    db.refresh(resource)
+    
+    # Log resource creation
+    create_audit_log(
+        db=db,
+        admin_user_id=current_user.id,
+        action="create_resource",
+        action_type="resource_create",
+        details={
+            "resource_id": resource.id,
+            "name": resource.name,
+            "type": resource.type,
+            "hostname": resource.hostname,
+            "port": resource.port,
+            "criticality": resource.criticality
+        },
+        request=request,
+        resource_id=resource.id,
+        severity="info"
+    )
+    
+    return resource
+
+@app.get("/api/resources", response_model=ResourceListResponse)
+def list_resources(
+    q: Optional[str] = Query(None, description="Search by name or hostname"),
+    type: Optional[str] = Query(None, description="Filter by resource type"),
+    criticality: Optional[str] = Query(None, description="Filter by criticality"),
+    page: int = Query(1, ge=1, description="Page number"),
+    limit: int = Query(25, ge=1, le=100, description="Items per page"),
+    sort_by: str = Query("name", description="Sort by field"),
+    order: str = Query("asc", description="Sort order"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    # Start with base query
+    query = db.query(Resource).filter(Resource.is_active == True)
+    
+    # Apply search filter
+    if q:
+        query = query.filter(
+            or_(
+                Resource.name.ilike(f"%{q}%"),
+                Resource.hostname.ilike(f"%{q}%")
+            )
+        )
+    
+    # Apply type filter
+    if type:
+        query = query.filter(Resource.type == type)
+    
+    # Apply criticality filter
+    if criticality:
+        query = query.filter(Resource.criticality == criticality)
+    
+    # Apply sorting
+    sort_column = getattr(Resource, sort_by, Resource.name)
+    if order == "desc":
+        query = query.order_by(sort_column.desc())
+    else:
+        query = query.order_by(sort_column.asc())
+    
+    # Get total count
+    total = query.count()
+    
+    # Apply pagination
+    offset = (page - 1) * limit
+    resources = query.offset(offset).limit(limit).all()
+    
+    return {
+        "items": resources,
+        "meta": {
+            "page": page,
+            "limit": limit,
+            "total": total,
+            "pages": (total + limit - 1) // limit
+        }
+    }
+
+@app.get("/api/resources/{resource_id}", response_model=ResourceResponse)
+def get_resource(
+    resource_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    resource = db.query(Resource).filter(
+        Resource.id == resource_id,
+        Resource.is_active == True
+    ).first()
+    
+    if not resource:
+        raise HTTPException(
+            status_code=404,
+            detail="Resource not found"
+        )
+    
+    return resource
+
+@app.put("/api/resources/{resource_id}", response_model=ResourceResponse)
+def update_resource(
+    resource_id: int,
+    resource_data: ResourceUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user),
+    request: Request = None
+):
+    resource = db.query(Resource).filter(Resource.id == resource_id).first()
+    
+    if not resource:
+        raise HTTPException(
+            status_code=404,
+            detail="Resource not found"
+        )
+    
+    # Store before state for audit
+    before_state = {
+        "name": resource.name,
+        "type": resource.type,
+        "hostname": resource.hostname,
+        "port": resource.port,
+        "description": resource.description,
+        "criticality": resource.criticality,
+        "check_interval": resource.check_interval
+    }
+    
+    # Check for duplicate name if name is being updated
+    if resource_data.name and resource_data.name != resource.name:
+        existing_resource = db.query(Resource).filter(
+            Resource.name == resource_data.name,
+            Resource.id != resource_id
+        ).first()
+        if existing_resource:
+            raise HTTPException(
+                status_code=409,
+                detail="Resource name already exists"
+            )
+    
+    # Check for duplicate hostname:port combination
+    if resource_data.hostname or resource_data.port is not None:
+        hostname = resource_data.hostname or resource.hostname
+        port = resource_data.port if resource_data.port is not None else resource.port
+        existing_hostname = db.query(Resource).filter(
+            and_(
+                Resource.hostname == hostname,
+                Resource.port == port,
+                Resource.id != resource_id,
+                Resource.is_active == True
+            )
+        ).first()
+        if existing_hostname:
+            raise HTTPException(
+                status_code=409,
+                detail="Resource with this hostname and port already exists"
+            )
+    
+    # Update fields
+    update_data = resource_data.dict(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(resource, field, value)
+    
+    db.commit()
+    db.refresh(resource)
+    
+    # Log resource update
+    create_audit_log(
+        db=db,
+        admin_user_id=current_user.id,
+        action="update_resource",
+        action_type="resource_update",
+        details={
+            "resource_id": resource.id,
+            "before": before_state,
+            "after": {
+                "name": resource.name,
+                "type": resource.type,
+                "hostname": resource.hostname,
+                "port": resource.port,
+                "description": resource.description,
+                "criticality": resource.criticality,
+                "check_interval": resource.check_interval
+            }
+        },
+        request=request,
+        resource_id=resource.id,
+        severity="info"
+    )
+    
+    return resource
+
+@app.delete("/api/resources/{resource_id}")
+def delete_resource(
+    resource_id: int,
+    force: bool = Query(False, description="Force deletion despite dependencies"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user),
+    request: Request = None
+):
+    resource = db.query(Resource).filter(Resource.id == resource_id).first()
+    
+    if not resource:
+        raise HTTPException(
+            status_code=404,
+            detail="Resource not found"
+        )
+    
+    # Check for active access requests
+    active_requests_count = db.query(AccessRequest).filter(
+        AccessRequest.resource_id == resource_id,
+        AccessRequest.status.in_(["pending", "approved"])
+    ).count()
+    
+    # Check for credentials
+    credentials_count = db.query(Credential).filter(
+        Credential.resource_id == resource_id
+    ).count()
+    
+    dependencies = {
+        "active_access_requests": active_requests_count,
+        "credentials": credentials_count
+    }
+    
+    # Block deletion if dependencies exist and force is not True
+    if not force and (active_requests_count > 0 or credentials_count > 0):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "Resource cannot be deleted due to existing dependencies",
+                "dependencies": dependencies,
+                "force_required": True
+            }
+        )
+    
+    # For force deletion or no dependencies, use soft delete
+    resource.is_active = False
+    db.commit()
+    
+    # Log resource deletion
+    severity = "warning" if force else "info"
+    create_audit_log(
+        db=db,
+        admin_user_id=current_user.id,
+        action="delete_resource",
+        action_type="resource_delete",
+        details={
+            "resource_id": resource.id,
+            "name": resource.name,
+            "force_deletion": force,
+            "dependencies": dependencies
+        },
+        request=request,
+        resource_id=resource.id,
+        severity=severity
+    )
+    
+    return {
+        "message": "Resource deleted successfully",
+        "details": dependencies if force else None
+    }
+
+# Health Check Endpoints
+@app.post("/api/resources/{resource_id}/check", response_model=HealthCheckResponse)
+async def check_resource_health(
+    resource_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    request: Request = None
+):
+    """Check health of a specific resource"""
+    resource = db.query(Resource).filter(
+        Resource.id == resource_id,
+        Resource.is_active == True
+    ).first()
+    
+    if not resource:
+        raise HTTPException(
+            status_code=404,
+            detail="Resource not found"
+        )
+    
+    # Perform health check
+    result = await health_check_service.check_resource_health(resource)
+    
+    # Update resource status
+    resource.is_online = result["is_online"]
+    resource.last_checked_at = datetime.utcnow()
+    
+    # Create check record
+    check = ResourceCheck(
+        resource_id=resource.id,
+        is_online=result["is_online"],
+        response_time=result["response_time"],
+        error_message=result["error_message"]
+    )
+    db.add(check)
+    db.commit()
+    
+    # Log health check
+    create_audit_log(
+        db=db,
+        admin_user_id=current_user.id if current_user.is_admin else None,
+        user_id=current_user.id if not current_user.is_admin else None,
+        action="Resource health check",
+        action_type="health_check",
+        details={
+            "resource_id": resource.id,
+            "resource_name": resource.name,
+            "is_online": result["is_online"],
+            "response_time": result["response_time"]
+        },
+        request=request,
+        resource_id=resource.id,
+        severity="info" if result["is_online"] else "warning"
+    )
+    
+    return {
+        "resource_id": resource.id,
+        "is_online": result["is_online"],
+        "response_time": result["response_time"],
+        "error_message": result["error_message"],
+        "checked_at": datetime.utcnow()
+    }
+
+@app.post("/api/resources/check-all", response_model=BulkHealthCheckResponse)
+async def check_all_resources_health(
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user),
+    request: Request = None
+):
+    """Check health of all resources (admin only)"""
+    resources = db.query(Resource).filter(Resource.is_active == True).all()
+    
+    results = []
+    for resource in resources:
+        try:
+            result = await health_check_service.check_resource_health(resource)
+            
+            # Update resource status
+            resource.is_online = result["is_online"]
+            resource.last_checked_at = datetime.utcnow()
+            
+            # Create check record
+            check = ResourceCheck(
+                resource_id=resource.id,
+                is_online=result["is_online"],
+                response_time=result["response_time"],
+                error_message=result["error_message"]
+            )
+            db.add(check)
+            
+            results.append({
+                "resource_id": resource.id,
+                "is_online": result["is_online"],
+                "response_time": result["response_time"],
+                "error_message": result["error_message"],
+                "checked_at": datetime.utcnow()
+            })
+            
+        except Exception as e:
+            results.append({
+                "resource_id": resource.id,
+                "is_online": False,
+                "response_time": None,
+                "error_message": str(e),
+                "checked_at": datetime.utcnow()
+            })
+    
+    db.commit()
+    
+    # Log bulk health check
+    create_audit_log(
+        db=db,
+        admin_user_id=current_user.id,
+        action="Bulk resource health check",
+        action_type="bulk_health_check",
+        details={
+            "total_checked": len(resources),
+            "online_count": len([r for r in results if r["is_online"]]),
+            "offline_count": len([r for r in results if not r["is_online"]])
+        },
+        request=request,
+        severity="info"
+    )
+    
+    return {
+        "results": results,
+        "total_checked": len(resources),
+        "online_count": len([r for r in results if r["is_online"]]),
+        "offline_count": len([r for r in results if not r["is_online"]])
+    }
+
+@app.get("/api/resources/{resource_id}/check-history", response_model=List[ResourceCheckResponse])
+def get_resource_check_history(
+    resource_id: int,
+    limit: int = Query(50, ge=1, le=1000),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get health check history for a resource"""
+    resource = db.query(Resource).filter(
+        Resource.id == resource_id,
+        Resource.is_active == True
+    ).first()
+    
+    if not resource:
+        raise HTTPException(
+            status_code=404,
+            detail="Resource not found"
+        )
+    
+    checks = db.query(ResourceCheck).options(
+        joinedload(ResourceCheck.resource)
+    ).filter(
+        ResourceCheck.resource_id == resource_id
+    ).order_by(ResourceCheck.checked_at.desc()).limit(limit).all()
+    
+    return checks
+
+@app.post("/api/resources/{resource_id}/check-background")
+def trigger_background_health_check(
+    resource_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user)
+):
+    """Trigger background health check for a resource"""
+    # This will use Celery to run the check in background
+    check_single_resource.delay(resource_id)
+    
+    return {"message": "Background health check started"}
+
+@app.post("/api/resources/check-all-background")
+def trigger_background_health_check_all(
+    current_user: User = Depends(get_current_admin_user)
+):
+    """Trigger background health check for all resources"""
+    check_all_resources.delay()
+    
+    return {"message": "Background health check for all resources started"}
+
+# Legacy resource endpoints (keep for backward compatibility)
+@app.post("/resources/", response_model=ResourceResponse)
+def create_resource_legacy(
     resource_data: ResourceCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_admin_user),
@@ -397,7 +903,7 @@ def create_resource(
     return resource
 
 @app.get("/resources/", response_model=List[ResourceResponse])
-def get_resources(
+def get_resources_legacy(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):

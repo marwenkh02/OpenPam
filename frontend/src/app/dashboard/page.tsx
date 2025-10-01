@@ -15,8 +15,13 @@ interface Resource {
   name: string;
   type: string;
   hostname: string;
+  port?: number;
   description?: string;
   criticality: string;
+  is_active: boolean;
+  is_online: boolean;
+  last_checked_at?: string;
+  check_interval: number;
 }
 
 interface AccessRequest {
@@ -59,11 +64,39 @@ interface AuditStats {
   recent_activity_24h: number;
 }
 
+interface ResourceCreate {
+  name: string;
+  type: string;
+  hostname: string;
+  port?: number;
+  description?: string;
+  criticality: string;
+}
+
+interface ResourceCheck {
+  id: number;
+  resource_id: number;
+  checked_at: string;
+  is_online: boolean;
+  response_time?: number;
+  error_message?: string;
+  resource?: Resource;
+}
+
+interface HealthCheckResponse {
+  resource_id: number;
+  is_online: boolean;
+  response_time?: number;
+  error_message?: string;
+  checked_at: string;
+}
+
 export default function Dashboard() {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [activeTab, setActiveTab] = useState<'overview' | 'requests' | 'admin' | 'audit'>('overview');
+  const [success, setSuccess] = useState('');
+  const [activeTab, setActiveTab] = useState<'overview' | 'requests' | 'admin' | 'audit' | 'resources'>('overview');
   const [resources, setResources] = useState<Resource[]>([]);
   const [myAccessRequests, setMyAccessRequests] = useState<AccessRequest[]>([]);
   const [allAccessRequests, setAllAccessRequests] = useState<AccessRequest[]>([]);
@@ -77,6 +110,23 @@ export default function Dashboard() {
   const [submitting, setSubmitting] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   
+  // Resource Management State
+  const [showCreateResourceModal, setShowCreateResourceModal] = useState(false);
+  const [showEditResourceModal, setShowEditResourceModal] = useState(false);
+  const [showDeleteResourceModal, setShowDeleteResourceModal] = useState(false);
+  const [selectedResource, setSelectedResource] = useState<Resource | null>(null);
+  const [newResource, setNewResource] = useState<ResourceCreate>({
+    name: '',
+    type: 'ssh',
+    hostname: '',
+    port: undefined,
+    description: '',
+    criticality: 'medium'
+  });
+  const [editResource, setEditResource] = useState<Partial<ResourceCreate>>({});
+  const [deleteForce, setDeleteForce] = useState(false);
+  const [deleteDependencies, setDeleteDependencies] = useState<any>(null);
+  
   // Audit Logs State
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [auditStats, setAuditStats] = useState<AuditStats | null>(null);
@@ -88,6 +138,17 @@ export default function Dashboard() {
     end_date: ''
   });
   const [loadingAuditLogs, setLoadingAuditLogs] = useState(false);
+
+  // Resources filtering and search
+  const [resourcesSearch, setResourcesSearch] = useState('');
+  const [resourcesTypeFilter, setResourcesTypeFilter] = useState('');
+  const [resourcesCriticalityFilter, setResourcesCriticalityFilter] = useState('');
+
+  // Health Monitoring State
+  const [checkingResources, setCheckingResources] = useState<Set<number>>(new Set());
+  const [showCheckHistoryModal, setShowCheckHistoryModal] = useState(false);
+  const [resourceCheckHistory, setResourceCheckHistory] = useState<ResourceCheck[]>([]);
+  const [selectedResourceForHistory, setSelectedResourceForHistory] = useState<Resource | null>(null);
 
   const router = useRouter();
 
@@ -147,15 +208,22 @@ export default function Dashboard() {
 
   const fetchResources = async () => {
     try {
-      const response = await fetch('/api/resources', {
+      const token = localStorage.getItem('token');
+      const queryParams = new URLSearchParams();
+      if (resourcesSearch) queryParams.append('q', resourcesSearch);
+      if (resourcesTypeFilter) queryParams.append('type', resourcesTypeFilter);
+      if (resourcesCriticalityFilter) queryParams.append('criticality', resourcesCriticalityFilter);
+      queryParams.append('limit', '100');
+
+      const response = await fetch(`/api/resources?${queryParams.toString()}`, {
         headers: {
-          'Authorization': `Bearer ${localStorage.getItem('token')}`
+          'Authorization': `Bearer ${token}`
         }
       });
 
       if (response.ok) {
         const data = await response.json();
-        setResources(data);
+        setResources(data.items || []);
       } else {
         const errorData = await response.json();
         console.error('Failed to fetch resources:', errorData.error);
@@ -163,6 +231,314 @@ export default function Dashboard() {
     } catch (err) {
       console.error('Failed to fetch resources:', err);
     }
+  };
+
+  // Health Monitoring Functions
+  const checkResourceHealth = async (resourceId: number) => {
+    setCheckingResources(prev => new Set(prev).add(resourceId));
+    
+    try {
+      const response = await fetch('/api/resources', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        },
+        body: JSON.stringify({
+          action: 'check',
+          resourceId: resourceId
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to check resource health');
+      }
+
+      const result: HealthCheckResponse = await response.json();
+      
+      // Update the resource in the local state
+      setResources(prev => prev.map(resource => 
+        resource.id === resourceId 
+          ? { 
+              ...resource, 
+              is_online: result.is_online, 
+              last_checked_at: result.checked_at 
+            }
+          : resource
+      ));
+
+      setSuccess(`Resource is ${result.is_online ? 'online' : 'offline'}`);
+      setTimeout(() => setSuccess(''), 3000);
+    } catch (err: any) {
+      setError(err.message || 'Failed to check resource health');
+    } finally {
+      setCheckingResources(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(resourceId);
+        return newSet;
+      });
+    }
+  };
+
+  const checkAllResourcesHealth = async () => {
+    setCheckingResources(new Set(resources.map(r => r.id)));
+    
+    try {
+      const response = await fetch('/api/resources', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        },
+        body: JSON.stringify({
+          action: 'check-all'
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to check all resources');
+      }
+
+      const result = await response.json();
+      
+      // Update resources with new status
+      setResources(prev => prev.map(resource => {
+        const checkResult = result.results.find((r: any) => r.resource_id === resource.id);
+        if (checkResult) {
+          return {
+            ...resource,
+            is_online: checkResult.is_online,
+            last_checked_at: checkResult.checked_at
+          };
+        }
+        return resource;
+      }));
+
+      setSuccess(`Checked ${result.total_checked} resources: ${result.online_count} online, ${result.offline_count} offline`);
+      setTimeout(() => setSuccess(''), 5000);
+    } catch (err: any) {
+      setError(err.message || 'Failed to check all resources');
+    } finally {
+      setCheckingResources(new Set());
+    }
+  };
+
+  const viewCheckHistory = async (resource: Resource) => {
+    setSelectedResourceForHistory(resource);
+    setLoading(true);
+    
+    try {
+      const response = await fetch('/api/resources', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        },
+        body: JSON.stringify({
+          action: 'check-history',
+          resourceId: resource.id
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to fetch check history');
+      }
+
+      const history = await response.json();
+      setResourceCheckHistory(history);
+      setShowCheckHistoryModal(true);
+    } catch (err: any) {
+      setError(err.message || 'Failed to fetch check history');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Status Badge Component
+  const StatusBadge = ({ resource }: { resource: Resource }) => {
+    const isChecking = checkingResources.has(resource.id);
+    
+    if (isChecking) {
+      return (
+        <span className="px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-800 flex items-center">
+          <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-blue-600 mr-1"></div>
+          Checking...
+        </span>
+      );
+    }
+    
+    if (!resource.last_checked_at) {
+      return (
+        <span className="px-2 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
+          Not Checked
+        </span>
+      );
+    }
+    
+    const baseClasses = "px-2 py-1 rounded-full text-xs font-medium whitespace-nowrap flex items-center";
+    const statusClasses = resource.is_online 
+      ? "bg-green-100 text-green-800" 
+      : "bg-red-100 text-red-800";
+    
+    return (
+      <span className={`${baseClasses} ${statusClasses}`}>
+        <div className={`w-2 h-2 rounded-full mr-1 ${resource.is_online ? 'bg-green-500' : 'bg-red-500'}`}></div>
+        {resource.is_online ? 'Online' : 'Offline'}
+      </span>
+    );
+  };
+
+  const handleCreateResource = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSubmitting(true);
+    setError('');
+
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch('/api/resources', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          action: 'create',
+          ...newResource
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to create resource');
+      }
+
+      setShowCreateResourceModal(false);
+      setNewResource({
+        name: '',
+        type: 'ssh',
+        hostname: '',
+        port: undefined,
+        description: '',
+        criticality: 'medium'
+      });
+      setSuccess('Resource created successfully!');
+      fetchResources();
+      
+      setTimeout(() => setSuccess(''), 3000);
+    } catch (err: any) {
+      setError(err.message || 'Failed to create resource');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleUpdateResource = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedResource) return;
+
+    setSubmitting(true);
+    setError('');
+
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch('/api/resources', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          action: 'update',
+          resourceId: selectedResource.id,
+          ...editResource
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to update resource');
+      }
+
+      setShowEditResourceModal(false);
+      setSelectedResource(null);
+      setEditResource({});
+      setSuccess('Resource updated successfully!');
+      fetchResources();
+      
+      setTimeout(() => setSuccess(''), 3000);
+    } catch (err: any) {
+      setError(err.message || 'Failed to update resource');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleDeleteResource = async () => {
+    if (!selectedResource) return;
+
+    setSubmitting(true);
+    setError('');
+
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch('/api/resources', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          action: 'delete',
+          resourceId: selectedResource.id,
+          force: deleteForce
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        if (errorData.details) {
+          setDeleteDependencies(errorData.details);
+          throw new Error(errorData.error || 'Resource has dependencies');
+        }
+        throw new Error(errorData.error || 'Failed to delete resource');
+      }
+
+      setShowDeleteResourceModal(false);
+      setSelectedResource(null);
+      setDeleteForce(false);
+      setDeleteDependencies(null);
+      setSuccess('Resource deleted successfully!');
+      fetchResources();
+      
+      setTimeout(() => setSuccess(''), 3000);
+    } catch (err: any) {
+      setError(err.message || 'Failed to delete resource');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const openEditResourceModal = (resource: Resource) => {
+    setSelectedResource(resource);
+    setEditResource({
+      name: resource.name,
+      type: resource.type,
+      hostname: resource.hostname,
+      port: resource.port,
+      description: resource.description,
+      criticality: resource.criticality
+    });
+    setShowEditResourceModal(true);
+  };
+
+  const openDeleteResourceModal = (resource: Resource) => {
+    setSelectedResource(resource);
+    setDeleteForce(false);
+    setDeleteDependencies(null);
+    setShowDeleteResourceModal(true);
   };
 
   const fetchMyAccessRequests = async () => {
@@ -343,6 +719,9 @@ export default function Dashboard() {
       } else {
         fetchMyAccessRequests();
       }
+
+      setSuccess('Access request created successfully!');
+      setTimeout(() => setSuccess(''), 3000);
     } catch (err: any) {
       setError(err.message || 'Failed to create access request');
     } finally {
@@ -367,6 +746,8 @@ export default function Dashboard() {
       if (response.ok) {
         fetchPendingAccessRequests();
         fetchAllAccessRequests();
+        setSuccess('Access request approved successfully!');
+        setTimeout(() => setSuccess(''), 3000);
       } else {
         const errorData = await response.json();
         throw new Error(errorData.error || 'Failed to approve request');
@@ -393,6 +774,8 @@ export default function Dashboard() {
       if (response.ok) {
         fetchPendingAccessRequests();
         fetchAllAccessRequests();
+        setSuccess('Access request rejected successfully!');
+        setTimeout(() => setSuccess(''), 3000);
       } else {
         const errorData = await response.json();
         throw new Error(errorData.error || 'Failed to reject request');
@@ -413,6 +796,36 @@ export default function Dashboard() {
         return `${baseClasses} bg-red-100 text-red-800`;
       case 'expired':
         return `${baseClasses} bg-gray-100 text-gray-800`;
+      default:
+        return `${baseClasses} bg-gray-100 text-gray-800`;
+    }
+  };
+
+  const getCriticalityBadge = (criticality: string) => {
+    const baseClasses = "px-2 py-1 rounded-full text-xs font-medium";
+    switch (criticality) {
+      case 'high':
+        return `${baseClasses} bg-red-100 text-red-800`;
+      case 'medium':
+        return `${baseClasses} bg-yellow-100 text-yellow-800`;
+      case 'low':
+        return `${baseClasses} bg-green-100 text-green-800`;
+      default:
+        return `${baseClasses} bg-gray-100 text-gray-800`;
+    }
+  };
+
+  const getTypeBadge = (type: string) => {
+    const baseClasses = "px-2 py-1 rounded-full text-xs font-medium";
+    switch (type) {
+      case 'ssh':
+        return `${baseClasses} bg-blue-100 text-blue-800`;
+      case 'rdp':
+        return `${baseClasses} bg-purple-100 text-purple-800`;
+      case 'db':
+        return `${baseClasses} bg-green-100 text-green-800`;
+      case 'api':
+        return `${baseClasses} bg-indigo-100 text-indigo-800`;
       default:
         return `${baseClasses} bg-gray-100 text-gray-800`;
     }
@@ -491,6 +904,89 @@ export default function Dashboard() {
             </button>
           </div>
         )}
+      </div>
+    </div>
+  );
+
+  // Mobile Resource Card for responsive view
+  const MobileResourceCard = ({ resource, showAdminActions = false }: { resource: Resource, showAdminActions?: boolean }) => (
+    <div className="bg-white rounded-lg shadow-sm border p-4 mb-3">
+      <div className="space-y-3">
+        <div className="flex justify-between items-start">
+          <div>
+            <h4 className="font-semibold text-gray-900 text-sm">{resource.name}</h4>
+            <p className="text-xs text-gray-500">{resource.hostname}:{resource.port || 'default'}</p>
+          </div>
+          <div className="flex flex-col items-end space-y-1">
+            <span className={getTypeBadge(resource.type)}>
+              {resource.type.toUpperCase()}
+            </span>
+            <span className={getCriticalityBadge(resource.criticality)}>
+              {resource.criticality}
+            </span>
+          </div>
+        </div>
+        
+        <div className="flex justify-between items-center">
+          <StatusBadge resource={resource} />
+          <span className="text-xs text-gray-500">
+            {resource.last_checked_at 
+              ? new Date(resource.last_checked_at).toLocaleString()
+              : 'Never checked'
+            }
+          </span>
+        </div>
+        
+        {resource.description && (
+          <div className="text-sm text-gray-600">
+            <p className="line-clamp-2">{resource.description}</p>
+          </div>
+        )}
+        
+        <div className="flex space-x-2">
+          {!showAdminActions ? (
+            <button
+              onClick={() => {
+                setNewRequest({
+                  ...newRequest,
+                  resource_id: resource.id.toString()
+                });
+                setShowRequestModal(true);
+              }}
+              className="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-2 px-3 rounded text-sm font-medium"
+            >
+              Request Access
+            </button>
+          ) : (
+            <>
+              <button
+                onClick={() => checkResourceHealth(resource.id)}
+                disabled={checkingResources.has(resource.id)}
+                className="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-2 px-3 rounded text-sm font-medium disabled:opacity-50"
+              >
+                {checkingResources.has(resource.id) ? 'Checking...' : 'Check Health'}
+              </button>
+              <button
+                onClick={() => viewCheckHistory(resource)}
+                className="flex-1 bg-green-600 hover:bg-green-700 text-white py-2 px-3 rounded text-sm font-medium"
+              >
+                History
+              </button>
+              <button
+                onClick={() => openEditResourceModal(resource)}
+                className="flex-1 bg-yellow-600 hover:bg-yellow-700 text-white py-2 px-3 rounded text-sm font-medium"
+              >
+                Edit
+              </button>
+              <button
+                onClick={() => openDeleteResourceModal(resource)}
+                className="flex-1 bg-red-600 hover:bg-red-700 text-white py-2 px-3 rounded text-sm font-medium"
+              >
+                Delete
+              </button>
+            </>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -591,6 +1087,17 @@ export default function Dashboard() {
               Overview
             </button>
             
+            <button
+              onClick={() => setActiveTab('resources')}
+              className={`py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
+                activeTab === 'resources'
+                  ? 'border-blue-500 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+              }`}
+            >
+              Resources
+            </button>
+            
             {!user?.is_admin && (
               <button
                 onClick={() => setActiveTab('requests')}
@@ -639,6 +1146,12 @@ export default function Dashboard() {
           </div>
         )}
 
+        {success && (
+          <div className="mb-4 sm:mb-6 p-3 sm:p-4 bg-green-50 text-green-700 rounded-md text-sm">
+            {success}
+          </div>
+        )}
+
         {/* Overview Tab */}
         {activeTab === 'overview' && (
           <div>
@@ -656,10 +1169,13 @@ export default function Dashboard() {
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6">
               <div className="bg-white rounded-lg shadow-sm sm:shadow-md p-4 sm:p-6">
-                <h3 className="text-base sm:text-lg font-semibold mb-2 sm:mb-3 text-gray-800">Credential Vault</h3>
-                <p className="text-gray-600 text-sm sm:text-base mb-3 sm:mb-4">Manage your privileged credentials securely.</p>
-                <button className="w-full sm:w-auto bg-blue-600 hover:bg-blue-700 text-white py-2 px-3 sm:px-4 rounded text-sm">
-                  Explore
+                <h3 className="text-base sm:text-lg font-semibold mb-2 sm:mb-3 text-gray-800">Available Resources</h3>
+                <p className="text-gray-600 text-sm sm:text-base mb-3 sm:mb-4">Browse and request access to available resources.</p>
+                <button 
+                  onClick={() => setActiveTab('resources')}
+                  className="w-full sm:w-auto bg-blue-600 hover:bg-blue-700 text-white py-2 px-3 sm:px-4 rounded text-sm"
+                >
+                  View Resources
                 </button>
               </div>
 
@@ -733,6 +1249,230 @@ export default function Dashboard() {
                   </div>
                 </>
               )}
+            </div>
+          </div>
+        )}
+
+        {/* Resources Tab - For all users */}
+        {activeTab === 'resources' && (
+          <div>
+            <div className="mb-6">
+              <h2 className="text-xl sm:text-2xl font-bold text-gray-800 mb-4">
+                {user?.is_admin ? 'Resource Management' : 'Available Resources'}
+              </h2>
+              
+              {/* Search and Filters */}
+              <div className="bg-white rounded-lg shadow-sm p-4 sm:p-6 mb-6">
+                <div className="flex flex-col sm:flex-row gap-4">
+                  <div className="flex-1">
+                    <input
+                      type="text"
+                      placeholder="Search resources by name or hostname..."
+                      value={resourcesSearch}
+                      onChange={(e) => setResourcesSearch(e.target.value)}
+                      className="w-full px-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div className="w-full sm:w-48">
+                    <select
+                      value={resourcesTypeFilter}
+                      onChange={(e) => setResourcesTypeFilter(e.target.value)}
+                      className="w-full px-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      <option value="">All Types</option>
+                      <option value="ssh">SSH</option>
+                      <option value="rdp">RDP</option>
+                      <option value="db">Database</option>
+                      <option value="api">API</option>
+                      <option value="web">Web</option>
+                      <option value="service">Service</option>
+                    </select>
+                  </div>
+                  <div className="w-full sm:w-48">
+                    <select
+                      value={resourcesCriticalityFilter}
+                      onChange={(e) => setResourcesCriticalityFilter(e.target.value)}
+                      className="w-full px-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      <option value="">All Criticalities</option>
+                      <option value="low">Low</option>
+                      <option value="medium">Medium</option>
+                      <option value="high">High</option>
+                    </select>
+                  </div>
+                  {user?.is_admin && (
+                    <button
+                      onClick={() => setShowCreateResourceModal(true)}
+                      className="w-full sm:w-auto bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded text-sm"
+                    >
+                      + New Resource
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Resources Grid/Table */}
+              <div className="bg-white rounded-lg shadow-sm overflow-hidden">
+                {resources.length > 0 ? (
+                  <>
+                    {/* Desktop Table */}
+                    <div className="hidden sm:block">
+                      <table className="min-w-full divide-y divide-gray-200">
+                        <thead className="bg-gray-50">
+                          <tr>
+                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                              Name
+                            </th>
+                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                              Type
+                            </th>
+                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                              Hostname
+                            </th>
+                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                              Status
+                            </th>
+                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                              Last Checked
+                            </th>
+                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                              Criticality
+                            </th>
+                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                              Actions
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody className="bg-white divide-y divide-gray-200">
+                          {resources.map((resource) => (
+                            <tr key={resource.id} className="hover:bg-gray-50">
+                              <td className="px-6 py-4 whitespace-nowrap">
+                                <div className="text-sm font-medium text-gray-900">
+                                  {resource.name}
+                                </div>
+                              </td>
+                              <td className="px-6 py-4 whitespace-nowrap">
+                                <span className={getTypeBadge(resource.type)}>
+                                  {resource.type.toUpperCase()}
+                                </span>
+                              </td>
+                              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                                {resource.hostname}:{resource.port || '-'}
+                              </td>
+                              <td className="px-6 py-4 whitespace-nowrap">
+                                <StatusBadge resource={resource} />
+                              </td>
+                              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                {resource.last_checked_at 
+                                  ? new Date(resource.last_checked_at).toLocaleString()
+                                  : 'Never'
+                                }
+                              </td>
+                              <td className="px-6 py-4 whitespace-nowrap">
+                                <span className={getCriticalityBadge(resource.criticality)}>
+                                  {resource.criticality}
+                                </span>
+                              </td>
+                              <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                                <div className="flex space-x-2">
+                                  {user?.is_admin ? (
+                                    <>
+                                      <button
+                                        onClick={() => checkResourceHealth(resource.id)}
+                                        disabled={checkingResources.has(resource.id)}
+                                        className="text-blue-600 hover:text-blue-900 disabled:opacity-50"
+                                        title="Check Health"
+                                      >
+                                        🔍
+                                      </button>
+                                      <button
+                                        onClick={() => viewCheckHistory(resource)}
+                                        className="text-green-600 hover:text-green-900"
+                                        title="View History"
+                                      >
+                                        📊
+                                      </button>
+                                      <button
+                                        onClick={() => openEditResourceModal(resource)}
+                                        className="text-yellow-600 hover:text-yellow-900"
+                                        title="Edit"
+                                      >
+                                        ✏️
+                                      </button>
+                                      <button
+                                        onClick={() => openDeleteResourceModal(resource)}
+                                        className="text-red-600 hover:text-red-900"
+                                        title="Delete"
+                                      >
+                                        🗑️
+                                      </button>
+                                    </>
+                                  ) : (
+                                    <button
+                                      onClick={() => {
+                                        setNewRequest({
+                                          ...newRequest,
+                                          resource_id: resource.id.toString()
+                                        });
+                                        setShowRequestModal(true);
+                                      }}
+                                      className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded text-sm"
+                                    >
+                                      Request Access
+                                    </button>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {/* Check All Button for Admin */}
+                    {user?.is_admin && (
+                      <div className="p-4 border-t">
+                        <button
+                          onClick={checkAllResourcesHealth}
+                          disabled={checkingResources.size > 0}
+                          className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded text-sm disabled:opacity-50"
+                        >
+                          {checkingResources.size > 0 ? 'Checking...' : 'Check All Resources'}
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Mobile Cards */}
+                    <div className="sm:hidden p-4">
+                      {resources.map((resource) => (
+                        <MobileResourceCard 
+                          key={resource.id} 
+                          resource={resource} 
+                          showAdminActions={user?.is_admin || false}
+                        />
+                      ))}
+                    </div>
+                  </>
+                ) : (
+                  <div className="text-center py-12">
+                    <div className="text-gray-400 mb-4">
+                      <svg className="mx-auto h-12 w-12" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+                      </svg>
+                    </div>
+                    <h3 className="text-lg font-medium text-gray-900 mb-2">No resources found</h3>
+                    <p className="text-gray-500">No resources match your current filters.</p>
+                    {user?.is_admin && (
+                      <button
+                        onClick={() => setShowCreateResourceModal(true)}
+                        className="mt-4 bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded"
+                      >
+                        Create Resource
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         )}
@@ -1285,7 +2025,7 @@ export default function Dashboard() {
       </main>
 
       {/* Request Access Modal */}
-      {showRequestModal && !user?.is_admin && (
+      {showRequestModal && (
         <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full flex items-center justify-center p-4 z-50">
           <div className="relative bg-white rounded-lg shadow-xl max-w-md w-full mx-auto">
             <div className="p-4 sm:p-6">
@@ -1357,6 +2097,376 @@ export default function Dashboard() {
                   </button>
                 </div>
               </form>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Create Resource Modal */}
+      {showCreateResourceModal && (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full flex items-center justify-center p-4 z-50">
+          <div className="relative bg-white rounded-lg shadow-xl max-w-md w-full mx-auto">
+            <div className="p-6">
+              <h3 className="text-lg font-semibold mb-4">Create New Resource</h3>
+              <form onSubmit={handleCreateResource}>
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Name *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      minLength={3}
+                      maxLength={100}
+                      value={newResource.name}
+                      onChange={(e) => setNewResource({...newResource, name: e.target.value})}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      placeholder="Resource name"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Type *
+                    </label>
+                    <select
+                      required
+                      value={newResource.type}
+                      onChange={(e) => setNewResource({...newResource, type: e.target.value})}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      <option value="ssh">SSH</option>
+                      <option value="rdp">RDP</option>
+                      <option value="db">Database</option>
+                      <option value="api">API</option>
+                      <option value="web">Web</option>
+                      <option value="service">Service</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Hostname *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={newResource.hostname}
+                      onChange={(e) => setNewResource({...newResource, hostname: e.target.value})}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      placeholder="hostname or IP address"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Port
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="65535"
+                      value={newResource.port || ''}
+                      onChange={(e) => setNewResource({...newResource, port: e.target.value ? parseInt(e.target.value) : undefined})}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      placeholder="Optional port number"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Criticality
+                    </label>
+                    <select
+                      value={newResource.criticality}
+                      onChange={(e) => setNewResource({...newResource, criticality: e.target.value})}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      <option value="low">Low</option>
+                      <option value="medium">Medium</option>
+                      <option value="high">High</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Description
+                    </label>
+                    <textarea
+                      value={newResource.description}
+                      onChange={(e) => setNewResource({...newResource, description: e.target.value})}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      rows={3}
+                      placeholder="Resource description..."
+                    />
+                  </div>
+                </div>
+                <div className="mt-6 flex justify-end space-x-3">
+                  <button
+                    type="button"
+                    onClick={() => setShowCreateResourceModal(false)}
+                    className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={submitting}
+                    className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 disabled:opacity-50"
+                  >
+                    {submitting ? 'Creating...' : 'Create Resource'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Resource Modal */}
+      {showEditResourceModal && selectedResource && (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full flex items-center justify-center p-4 z-50">
+          <div className="relative bg-white rounded-lg shadow-xl max-w-md w-full mx-auto">
+            <div className="p-6">
+              <h3 className="text-lg font-semibold mb-4">Edit Resource</h3>
+              <form onSubmit={handleUpdateResource}>
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Name *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      minLength={3}
+                      maxLength={100}
+                      value={editResource.name || ''}
+                      onChange={(e) => setEditResource({...editResource, name: e.target.value})}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Type *
+                    </label>
+                    <select
+                      required
+                      value={editResource.type || ''}
+                      onChange={(e) => setEditResource({...editResource, type: e.target.value})}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      <option value="ssh">SSH</option>
+                      <option value="rdp">RDP</option>
+                      <option value="db">Database</option>
+                      <option value="api">API</option>
+                      <option value="web">Web</option>
+                      <option value="service">Service</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Hostname *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={editResource.hostname || ''}
+                      onChange={(e) => setEditResource({...editResource, hostname: e.target.value})}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Port
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="65535"
+                      value={editResource.port || ''}
+                      onChange={(e) => setEditResource({...editResource, port: e.target.value ? parseInt(e.target.value) : undefined})}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Criticality
+                    </label>
+                    <select
+                      value={editResource.criticality || ''}
+                      onChange={(e) => setEditResource({...editResource, criticality: e.target.value})}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      <option value="low">Low</option>
+                      <option value="medium">Medium</option>
+                      <option value="high">High</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Description
+                    </label>
+                    <textarea
+                      value={editResource.description || ''}
+                      onChange={(e) => setEditResource({...editResource, description: e.target.value})}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      rows={3}
+                    />
+                  </div>
+                </div>
+                <div className="mt-6 flex justify-end space-x-3">
+                  <button
+                    type="button"
+                    onClick={() => setShowEditResourceModal(false)}
+                    className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={submitting}
+                    className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 disabled:opacity-50"
+                  >
+                    {submitting ? 'Updating...' : 'Update Resource'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Resource Modal */}
+      {showDeleteResourceModal && selectedResource && (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full flex items-center justify-center p-4 z-50">
+          <div className="relative bg-white rounded-lg shadow-xl max-w-md w-full mx-auto">
+            <div className="p-6">
+              <h3 className="text-lg font-semibold mb-4 text-red-600">Delete Resource</h3>
+              
+              {deleteDependencies ? (
+                <div className="mb-4 p-4 bg-yellow-50 border border-yellow-200 rounded-md">
+                  <p className="text-yellow-800 font-semibold mb-2">Resource has dependencies:</p>
+                  <ul className="text-yellow-700 text-sm list-disc list-inside">
+                    {deleteDependencies.active_access_requests > 0 && (
+                      <li>Active Access Requests: {deleteDependencies.active_access_requests}</li>
+                    )}
+                    {deleteDependencies.credentials > 0 && (
+                      <li>Credentials: {deleteDependencies.credentials}</li>
+                    )}
+                  </ul>
+                  <div className="mt-3 flex items-center">
+                    <input
+                      type="checkbox"
+                      id="forceDelete"
+                      checked={deleteForce}
+                      onChange={(e) => setDeleteForce(e.target.checked)}
+                      className="mr-2"
+                    />
+                    <label htmlFor="forceDelete" className="text-yellow-800 text-sm">
+                      Force delete (this will remove all dependencies)
+                    </label>
+                  </div>
+                </div>
+              ) : (
+                <p className="mb-4 text-gray-700">
+                  Are you sure you want to delete the resource <strong>"{selectedResource.name}"</strong>? 
+                  This action cannot be undone.
+                </p>
+              )}
+
+              <div className="flex justify-end space-x-3">
+                <button
+                  onClick={() => setShowDeleteResourceModal(false)}
+                  className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleDeleteResource}
+                  disabled={submitting || (deleteDependencies && !deleteForce)}
+                  className="px-4 py-2 text-sm font-medium text-white bg-red-600 rounded-md hover:bg-red-700 disabled:opacity-50"
+                >
+                  {submitting ? 'Deleting...' : 'Delete Resource'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Check History Modal */}
+      {showCheckHistoryModal && selectedResourceForHistory && (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full flex items-center justify-center p-4 z-50">
+          <div className="relative bg-white rounded-lg shadow-xl max-w-4xl w-full mx-auto">
+            <div className="p-6">
+              <h3 className="text-lg font-semibold mb-4">
+                Health Check History - {selectedResourceForHistory.name}
+              </h3>
+              
+              <div className="mb-4">
+                <p className="text-sm text-gray-600">
+                  Hostname: {selectedResourceForHistory.hostname}:{selectedResourceForHistory.port || 'default'}
+                </p>
+              </div>
+
+              <div className="max-h-96 overflow-y-auto">
+                <table className="min-w-full divide-y divide-gray-200">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">
+                        Checked At
+                      </th>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">
+                        Status
+                      </th>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">
+                        Response Time
+                      </th>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">
+                        Error
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-gray-200">
+                    {resourceCheckHistory.map((check) => (
+                      <tr key={check.id} className="hover:bg-gray-50">
+                        <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-500">
+                          {new Date(check.checked_at).toLocaleString()}
+                        </td>
+                        <td className="px-4 py-2 whitespace-nowrap">
+                          <span className={`px-2 py-1 rounded-full text-xs font-medium whitespace-nowrap flex items-center ${
+                            check.is_online ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+                          }`}>
+                            <div className={`w-2 h-2 rounded-full mr-1 ${check.is_online ? 'bg-green-500' : 'bg-red-500'}`}></div>
+                            {check.is_online ? 'Online' : 'Offline'}
+                          </span>
+                        </td>
+                        <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-500">
+                          {check.response_time ? `${check.response_time}ms` : '-'}
+                        </td>
+                        <td className="px-4 py-2 text-sm text-gray-500 max-w-xs truncate">
+                          {check.error_message || '-'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                
+                {resourceCheckHistory.length === 0 && (
+                  <div className="text-center py-8 text-gray-500">
+                    No health check history available
+                  </div>
+                )}
+              </div>
+
+              <div className="mt-6 flex justify-end">
+                <button
+                  onClick={() => {
+                    setShowCheckHistoryModal(false);
+                    setSelectedResourceForHistory(null);
+                    setResourceCheckHistory([]);
+                  }}
+                  className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200"
+                >
+                  Close
+                </button>
+              </div>
             </div>
           </div>
         </div>
