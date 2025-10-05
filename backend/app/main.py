@@ -1,12 +1,40 @@
-from fastapi import FastAPI, Depends, HTTPException, status, Request, BackgroundTasks
+# Add these imports at the top
+import os
+from cryptography.fernet import Fernet
+import base64
+import asyncio
+import asyncssh
+import logging
+from typing import Optional, Dict, Any
+
+# Add credential encryption (add to top of file after imports)
+def get_encryption_key():
+    key = os.getenv('ENCRYPTION_KEY')
+    if not key:
+        # Generate a key if none exists (for development)
+        key = Fernet.generate_key()
+        print(f"WARNING: Using generated encryption key: {key.decode()}")
+    return key
+
+fernet = Fernet(get_encryption_key())
+
+def encrypt_credential(credential: str) -> str:
+    return fernet.encrypt(credential.encode()).decode()
+
+def decrypt_credential(encrypted_credential: str) -> str:
+    return fernet.decrypt(encrypted_credential.encode()).decode()
+
+from fastapi import FastAPI, Depends, HTTPException, status, Request, BackgroundTasks, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session, joinedload
 from datetime import datetime, timedelta
 import logging
 from jose import JWTError, jwt
-from typing import List, Optional
+from typing import List, Optional, Dict
 from fastapi import Query
 from sqlalchemy import or_, and_
+import json
+import base64
 
 from .database import SessionLocal, engine, get_db
 from .models import User, Base, AccessRequest, Resource, AuditLog, AuditActionType, Credential, ResourceCheck
@@ -16,7 +44,8 @@ from .schemas import (
     AccessRequestCreate, AccessRequestResponse, AccessRequestUpdate,
     ResourceCreate, ResourceResponse, ResourceUpdate, ResourceListResponse, 
     AuditLogResponse, AuditLogFilter, HealthCheckResponse, BulkHealthCheckResponse, 
-    ResourceCheckResponse, HealthCheckRequest
+    ResourceCheckResponse, HealthCheckRequest, CredentialCreate, CredentialResponse,
+    CredentialUpdate, CredentialType
 )
 from .auth import (
     get_password_hash, authenticate_user, 
@@ -57,6 +86,406 @@ except ImportError:
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# SSH Service Implementation
+class SSHService:
+    def __init__(self):
+        self.connections: Dict[int, asyncssh.SSHClientConnection] = {}
+        self.timeout = 30
+
+    async def connect_with_private_key(self, hostname: str, port: int, username: str, private_key: str) -> asyncssh.SSHClientConnection:
+        """Connect to SSH using private key authentication with improved error handling"""
+        try:
+            logger.info(f"🔑 Attempting SSH key connection to {username}@{hostname}:{port}")
+            
+            # Clean and validate private key
+            private_key = private_key.strip()
+            
+            # Fix common formatting issues
+            if '\\n' in private_key:
+                private_key = private_key.replace('\\n', '\n')
+                logger.info("✅ Fixed escaped newlines in private key")
+            
+            # Ensure proper key format
+            if not private_key.startswith('-----BEGIN'):
+                logger.error("❌ Private key missing BEGIN marker")
+                raise Exception("Private key format invalid - missing BEGIN marker")
+            
+            if not private_key.endswith('-----END OPENSSH PRIVATE KEY-----') and not private_key.endswith('-----END PRIVATE KEY-----'):
+                logger.error("❌ Private key missing END marker")
+                raise Exception("Private key format invalid - missing END marker")
+            
+            # Import the private key
+            try:
+                logger.info("🔄 Importing private key...")
+                key = asyncssh.import_private_key(private_key)
+                logger.info("✅ Successfully imported private key")
+                
+            except Exception as key_error:
+                logger.error(f"❌ Failed to import private key: {key_error}")
+                # Try alternative import method
+                try:
+                    # For ed25519 keys specifically
+                    if 'OPENSSH PRIVATE KEY' in private_key:
+                        key = asyncssh.import_private_key(private_key)
+                    else:
+                        raise key_error
+                except Exception:
+                    raise Exception(f"Invalid private key format: {key_error}")
+            
+            # Test connection with comprehensive options
+            logger.info(f"🔗 Establishing SSH connection to {hostname}:{port}...")
+            
+            conn = await asyncio.wait_for(
+                asyncssh.connect(
+                    hostname,
+                    port=port,
+                    username=username,
+                    client_keys=[key],
+                    known_hosts=None,
+                    connect_timeout=15,
+                    # Add comprehensive connection options
+                    kex_algs=[
+                        'curve25519-sha256', 'curve25519-sha256@libssh.org',
+                        'ecdh-sha2-nistp256', 'ecdh-sha2-nistp384', 'ecdh-sha2-nistp521'
+                    ],
+                    encryption_algs=[
+                        'chacha20-poly1305@openssh.com',
+                        'aes128-ctr', 'aes192-ctr', 'aes256-ctr',
+                        'aes128-gcm@openssh.com', 'aes256-gcm@openssh.com'
+                    ],
+                    server_host_key_algs=[
+                        'ssh-ed25519', 'ssh-rsa', 'rsa-sha2-256', 'rsa-sha2-512'
+                    ]
+                ),
+                timeout=self.timeout
+            )
+            
+            logger.info(f"✅ SSH key connection established to {hostname}")
+            return conn
+            
+        except asyncssh.PermissionDenied:
+            logger.error(f"❌ SSH key authentication failed for {username}@{hostname}")
+            raise Exception("Key authentication failed - invalid private key or username")
+        except asyncio.TimeoutError:
+            logger.error(f"⏰ SSH key connection timeout to {hostname}:{port}")
+            raise Exception(f"Connection timeout to {hostname}")
+        except asyncssh.Error as ssh_error:
+            logger.error(f"🔌 SSH key connection error to {hostname}: {str(ssh_error)}")
+            raise Exception(f"SSH connection failed: {str(ssh_error)}")
+        except Exception as e:
+            logger.error(f"💥 Unexpected SSH key connection error to {hostname}: {str(e)}")
+            raise Exception(f"SSH connection failed: {str(e)}")
+
+ssh_service = SSHService()
+
+# SSH Session Manager Implementation
+class SSHSessionManager:
+    def __init__(self):
+        self.sessions: Dict[int, Dict] = {}
+
+    async def handle_ssh_websocket(self, websocket: WebSocket, resource_id: int, token: str, credential_id: str = None):
+        """Handle SSH WebSocket connection"""
+        db = SessionLocal()
+        ssh_conn = None
+        ssh_process = None
+        
+        try:
+            # Authenticate user
+            user = await self.authenticate_user(token, db)
+            if not user:
+                await websocket.close(code=1008)
+                return
+
+            # Verify access
+            resource, credential = await self.verify_access(user, resource_id, credential_id, db)
+            if not resource or not credential:
+                await websocket.send_text(json.dumps({
+                    "type": "error", 
+                    "message": "Access denied or resource not found"
+                }))
+                await websocket.close(code=1008)
+                return
+
+            # Get decrypted credentials
+            ssh_username, ssh_password, ssh_private_key = await self.get_credentials(credential)
+            if not ssh_username:
+                await websocket.send_text(json.dumps({
+                    "type": "error", 
+                    "message": "Invalid credential configuration"
+                }))
+                return
+
+            # Establish SSH connection
+            await websocket.send_text(json.dumps({
+                "type": "status",
+                "message": f"Connecting to {resource.hostname} as {ssh_username}..."
+            }))
+
+            try:
+                if ssh_private_key:
+                    ssh_conn = await ssh_service.connect_with_private_key(
+                        resource.hostname, resource.port or 22, ssh_username, ssh_private_key
+                    )
+                else:
+                    ssh_conn = await ssh_service.connect_with_password(
+                        resource.hostname, resource.port or 22, ssh_username, ssh_password
+                    )
+            except Exception as conn_error:
+                logger.error(f"SSH connection failed: {str(conn_error)}")
+                await websocket.send_text(json.dumps({
+                    "type": "error",
+                    "message": f"SSH connection failed: {str(conn_error)}"
+                }))
+                return
+
+            if not ssh_conn:
+                await websocket.send_text(json.dumps({
+                    "type": "error",
+                    "message": "Failed to establish SSH connection"
+                }))
+                return
+
+            await websocket.send_text(json.dumps({
+                "type": "status", 
+                "message": "SSH connection established, starting shell..."
+            }))
+
+            # Start shell process
+            try:
+                ssh_process = await ssh_conn.create_process(
+                    term_type='xterm-256color',
+                    term_size=(80, 24)
+                )
+                
+                await websocket.send_text(json.dumps({
+                    "type": "connected",
+                    "message": f"Connected to {resource.hostname} as {ssh_username}"
+                }))
+
+                # Log session start
+                create_audit_log(
+                    db=db,
+                    user_id=user.id,
+                    action="SSH session started",
+                    action_type="session_start",
+                    details={
+                        "resource_id": resource_id,
+                        "resource_name": resource.name,
+                        "hostname": resource.hostname,
+                        "username": ssh_username,
+                        "credential_id": credential.id,
+                        "session_type": "ssh"
+                    },
+                    resource_id=resource_id,
+                    severity="info"
+                )
+
+                # Start bidirectional data transfer
+                await self.handle_bidirectional_communication(websocket, ssh_process, resource_id, user.id, db)
+
+            except Exception as shell_error:
+                logger.error(f"Failed to start shell: {str(shell_error)}")
+                await websocket.send_text(json.dumps({
+                    "type": "error",
+                    "message": f"Failed to start shell: {str(shell_error)}"
+                }))
+
+        except Exception as e:
+            logger.error(f"SSH WebSocket error: {str(e)}")
+            await self.send_error(websocket, f"Connection error: {str(e)}")
+        finally:
+            # Cleanup
+            await self.cleanup_connection(ssh_process, ssh_conn, db)
+
+    async def authenticate_user(self, token: str, db: Session) -> Optional[User]:
+        """Authenticate user from JWT token"""
+        try:
+            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+            username = payload.get("sub")
+            if not username:
+                return None
+            
+            return db.query(User).filter(User.username == username, User.is_active == True).first()
+        except JWTError:
+            return None
+
+    async def verify_access(self, user: User, resource_id: int, credential_id: str, db: Session):
+        """Verify user has access to resource and credential"""
+        # Get resource
+        resource = db.query(Resource).filter(
+            Resource.id == resource_id, 
+            Resource.is_active == True
+        ).first()
+        
+        if not resource:
+            return None, None
+
+        # Get credential
+        credential_query = db.query(Credential).filter(
+            Credential.resource_id == resource_id,
+            Credential.is_active == True
+        )
+        
+        if credential_id:
+            credential = credential_query.filter(Credential.id == int(credential_id)).first()
+        else:
+            credential = credential_query.first()
+
+        if not credential:
+            return None, None
+
+        # Check access permissions
+        if not user.is_admin:
+            approved_request = db.query(AccessRequest).filter(
+                AccessRequest.user_id == user.id,
+                AccessRequest.resource_id == resource_id,
+                AccessRequest.status == 'approved',
+                AccessRequest.expires_at > datetime.utcnow()
+            ).first()
+            
+            if not approved_request:
+                return None, None
+
+        return resource, credential
+
+    async def get_credentials(self, credential: Credential):
+        """Get decrypted credentials"""
+        ssh_username = credential.username
+        ssh_password = None
+        ssh_private_key = None
+
+        if credential.encrypted_password:
+            ssh_password = decrypt_credential(credential.encrypted_password)
+        
+        if credential.encrypted_private_key:
+            ssh_private_key = decrypt_credential(credential.encrypted_private_key)
+
+        return ssh_username, ssh_password, ssh_private_key
+
+    async def establish_ssh_connection(self, hostname: str, port: int, username: str, password: str, private_key: str):
+        """Establish SSH connection with better error handling"""
+        try:
+            if private_key:
+                logger.info(f"🔑 Using private key authentication for {username}@{hostname}")
+                # Log key info for debugging
+                logger.info(f"📋 Private key preview: {private_key[:100]}...")
+                return await ssh_service.connect_with_private_key(hostname, port, username, private_key)
+            else:
+                logger.info(f"🔑 Using password authentication for {username}@{hostname}")
+                return await ssh_service.connect_with_password(hostname, port, username, password)
+        except Exception as e:
+            logger.error(f"❌ SSH connection failed: {str(e)}")
+            logger.error(f"🔧 Connection details: {username}@{hostname}:{port}")
+            if private_key:
+                logger.error(f"🔑 Key type: SSH Private Key (length: {len(private_key)})")
+            raise Exception(f"SSH connection failed: {str(e)}")
+
+    async def handle_bidirectional_communication(self, websocket: WebSocket, ssh_process, resource_id: int, user_id: int, db: Session):
+        """Handle data transfer between WebSocket and SSH process"""
+        
+        async def read_ssh_output():
+            """Read output from SSH process and send to WebSocket"""
+            try:
+                async for data in ssh_process.stdout:
+                    if data:
+                        await websocket.send_text(json.dumps({
+                            "type": "output",
+                            "data": data
+                        }))
+            except Exception as e:
+                logger.error(f"SSH read error: {str(e)}")
+
+        async def read_websocket_input():
+            """Read input from WebSocket and send to SSH process"""
+            try:
+                while True:
+                    data = await websocket.receive_text()
+                    message = json.loads(data)
+                    
+                    if message["type"] == "input":
+                        ssh_process.stdin.write(message["data"])
+                    elif message["type"] == "resize":
+                        # Handle terminal resize
+                        cols = message.get("cols", 80)
+                        rows = message.get("rows", 24)
+                        ssh_process.change_terminal_size(cols, rows)
+                        
+            except WebSocketDisconnect:
+                logger.info("WebSocket client disconnected")
+            except Exception as e:
+                logger.error(f"WebSocket read error: {str(e)}")
+
+        # Create tasks for reading from SSH and WebSocket
+        read_ssh_task = asyncio.create_task(read_ssh_output())
+        read_websocket_task = asyncio.create_task(read_websocket_input())
+
+        try:
+            # Wait for either task to complete/fail
+            done, pending = await asyncio.wait(
+                [read_ssh_task, read_websocket_task],
+                return_when=asyncio.FIRST_COMPLETED
+            )
+        finally:
+            # Cancel pending tasks
+            for task in pending:
+                task.cancel()
+
+            # Log session end
+            create_audit_log(
+                db=db,
+                user_id=user_id,
+                action="SSH session ended",
+                action_type="session_end",
+                details={
+                    "resource_id": resource_id,
+                },
+                resource_id=resource_id,
+                severity="info"
+            )
+
+    async def send_error(self, websocket: WebSocket, message: str):
+        """Send error message to WebSocket"""
+        try:
+            await websocket.send_text(json.dumps({
+                "type": "error",
+                "message": message
+            }))
+        except:
+            pass
+
+    async def cleanup_connection(self, ssh_process, ssh_conn, db: Session):
+        """Clean up connections"""
+        try:
+            if ssh_process:
+                ssh_process.close()
+            if ssh_conn:
+                ssh_conn.close()
+        except:
+            pass
+        finally:
+            db.close()
+
+ssh_session_manager = SSHSessionManager()
+
+# WebSocket connection manager
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: Dict[int, WebSocket] = {}
+
+    async def connect(self, websocket: WebSocket, connection_id: int):
+        await websocket.accept()
+        self.active_connections[connection_id] = websocket
+
+    def disconnect(self, connection_id: int):
+        if connection_id in self.active_connections:
+            del self.active_connections[connection_id]
+
+    async def send_message(self, message: str, connection_id: int):
+        if connection_id in self.active_connections:
+            await self.active_connections[connection_id].send_text(message)
+
+manager = ConnectionManager()
 
 app = FastAPI(title="OpenPAM Backend", version="1.0.0")
 
@@ -105,6 +534,373 @@ def create_audit_log(
 @app.get("/")
 async def root():
     return {"message": "OpenPAM API is running"}
+
+# Updated WebSocket SSH handler with improved connection management
+@app.websocket("/ws/resources/{resource_id}/ssh")
+async def websocket_ssh_session(websocket: WebSocket, resource_id: int):
+    await websocket.accept()
+    
+    try:
+        # Get query parameters
+        query_params = dict(websocket.query_params)
+        token = query_params.get('token')
+        credential_id = query_params.get('credential_id')
+        
+        if not token:
+            await websocket.close(code=1008)
+            return
+            
+        await ssh_session_manager.handle_ssh_websocket(
+            websocket, resource_id, token, credential_id
+        )
+    except Exception as e:
+        logger.error(f"WebSocket setup failed: {str(e)}")
+        await websocket.close(code=1011)
+
+# Credential Management Endpoints
+@app.post("/api/resources/{resource_id}/credentials", response_model=CredentialResponse)
+def create_credential(
+    resource_id: int,
+    credential_data: CredentialCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user),
+    request: Request = None
+):
+    """Create credentials for a resource"""
+    try:
+        # Verify resource exists and is active
+        resource = db.query(Resource).filter(
+            Resource.id == resource_id,
+            Resource.is_active == True
+        ).first()
+        
+        if not resource:
+            raise HTTPException(
+                status_code=404,
+                detail="Resource not found"
+            )
+        
+        # Check if credential name already exists for this resource
+        existing_credential = db.query(Credential).filter(
+            Credential.resource_id == resource_id,
+            Credential.name == credential_data.name
+        ).first()
+        
+        if existing_credential:
+            raise HTTPException(
+                status_code=409,
+                detail="Credential name already exists for this resource"
+            )
+        
+        # Validate credential data based on type
+        if credential_data.type == CredentialType.PASSWORD and not credential_data.password:
+            raise HTTPException(
+                status_code=422,
+                detail="Password is required for password type credentials"
+            )
+        elif credential_data.type == CredentialType.SSH_KEY and not credential_data.private_key:
+            raise HTTPException(
+                status_code=422,
+                detail="Private key is required for SSH key type credentials"
+            )
+        
+        # Encrypt sensitive data - store as-is without additional encoding
+        encrypted_password = None
+        encrypted_private_key = None
+        
+        if credential_data.password:
+            encrypted_password = encrypt_credential(credential_data.password)
+        
+        if credential_data.private_key:
+            # Store the private key as-is, don't do any base64 encoding
+            private_key_content = credential_data.private_key.strip()
+            
+            # Only fix formatting issues, don't change the content
+            if '\\n' in private_key_content:
+                private_key_content = private_key_content.replace('\\n', '\n')
+            
+            encrypted_private_key = encrypt_credential(private_key_content)
+        
+        # Create credential
+        credential = Credential(
+            resource_id=resource_id,
+            name=credential_data.name,
+            type=credential_data.type.value if hasattr(credential_data.type, 'value') else credential_data.type,
+            username=credential_data.username,
+            encrypted_password=encrypted_password,
+            encrypted_private_key=encrypted_private_key,
+            vault_path=None,
+            rotation_interval_days=30  # Default rotation interval
+        )
+        
+        db.add(credential)
+        db.commit()
+        db.refresh(credential)
+        
+        # Log credential creation
+        create_audit_log(
+            db=db,
+            admin_user_id=current_user.id,
+            action="Credential created",
+            action_type="credential_create",
+            details={
+                "resource_id": resource_id,
+                "resource_name": resource.name,
+                "credential_name": credential_data.name,
+                "credential_type": credential_data.type,
+                "username": credential_data.username
+            },
+            request=request,
+            resource_id=resource_id,
+            severity="info"
+        )
+        
+        return {
+            "id": credential.id,
+            "resource_id": credential.resource_id,
+            "name": credential.name,
+            "type": credential.type,
+            "username": credential.username,
+            "is_active": credential.is_active,
+            "last_rotated_at": credential.last_rotated_at,
+            "rotation_interval_days": credential.rotation_interval_days,
+            "created_at": credential.created_at,
+            "updated_at": credential.updated_at
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating credential: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Internal server error while creating credential"
+        )
+
+@app.get("/api/resources/{resource_id}/credentials", response_model=List[CredentialResponse])
+def get_resource_credentials(
+    resource_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user)
+):
+    """Get all credentials for a resource"""
+    credentials = db.query(Credential).filter(
+        Credential.resource_id == resource_id,
+        Credential.is_active == True
+    ).all()
+    
+    return credentials
+
+@app.get("/api/credentials/{credential_id}", response_model=CredentialResponse)
+def get_credential(
+    credential_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user)
+):
+    """Get specific credential details"""
+    credential = db.query(Credential).filter(
+        Credential.id == credential_id,
+        Credential.is_active == True
+    ).first()
+    
+    if not credential:
+        raise HTTPException(
+            status_code=404,
+            detail="Credential not found"
+        )
+    
+    return {
+        "id": credential.id,
+        "resource_id": credential.resource_id,
+        "name": credential.name,
+        "type": credential.type,
+        "username": credential.username,
+        "is_active": credential.is_active,
+        "last_rotated_at": credential.last_rotated_at,
+        "rotation_interval_days": credential.rotation_interval_days
+    }
+
+@app.put("/api/credentials/{credential_id}", response_model=CredentialResponse)
+def update_credential(
+    credential_id: int,
+    credential_data: CredentialUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user),
+    request: Request = None
+):
+    """Update a credential"""
+    credential = db.query(Credential).filter(
+        Credential.id == credential_id,
+        Credential.is_active == True
+    ).first()
+    
+    if not credential:
+        raise HTTPException(
+            status_code=404,
+            detail="Credential not found"
+        )
+    
+    # Check if credential name already exists for this resource (if name is being updated)
+    if credential_data.name and credential_data.name != credential.name:
+        existing_credential = db.query(Credential).filter(
+            Credential.resource_id == credential.resource_id,
+            Credential.name == credential_data.name,
+            Credential.id != credential_id
+        ).first()
+        
+        if existing_credential:
+            raise HTTPException(
+                status_code=409,
+                detail="Credential name already exists for this resource"
+            )
+    
+    # Store before state for audit
+    before_state = {
+        "name": credential.name,
+        "type": credential.type,
+        "username": credential.username
+    }
+    
+    # Update fields
+    update_data = credential_data.dict(exclude_unset=True)
+    
+    # Handle password/private key encryption if provided
+    if 'password' in update_data and update_data['password']:
+        credential.encrypted_password = encrypt_credential(update_data['password'])
+        # Remove from update_data to avoid direct assignment
+        del update_data['password']
+    
+    if 'private_key' in update_data and update_data['private_key']:
+        # Store private key as-is without additional encoding
+        private_key_content = update_data['private_key'].strip()
+        if '\\n' in private_key_content:
+            private_key_content = private_key_content.replace('\\n', '\n')
+        credential.encrypted_private_key = encrypt_credential(private_key_content)
+        # Remove from update_data to avoid direct assignment
+        del update_data['private_key']
+    
+    for field, value in update_data.items():
+        setattr(credential, field, value)
+    
+    credential.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(credential)
+    
+    # Log credential update
+    create_audit_log(
+        db=db,
+        admin_user_id=current_user.id,
+        action="Credential updated",
+        action_type="credential_update",
+        details={
+            "credential_id": credential_id,
+            "resource_id": credential.resource_id,
+            "before": before_state,
+            "after": {
+                "name": credential.name,
+                "type": credential.type,
+                "username": credential.username
+            }
+        },
+        request=request,
+        resource_id=credential.resource_id,
+        severity="info"
+    )
+    
+    return {
+        "id": credential.id,
+        "resource_id": credential.resource_id,
+        "name": credential.name,
+        "type": credential.type,
+        "username": credential.username,
+        "is_active": credential.is_active,
+        "last_rotated_at": credential.last_rotated_at,
+        "rotation_interval_days": credential.rotation_interval_days
+    }
+
+@app.delete("/api/credentials/{credential_id}")
+def delete_credential(
+    credential_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user),
+    request: Request = None
+):
+    """Delete a credential"""
+    credential = db.query(Credential).filter(Credential.id == credential_id).first()
+    
+    if not credential:
+        raise HTTPException(
+            status_code=404,
+            detail="Credential not found"
+        )
+    
+    # Store credential info for audit log
+    credential_info = {
+        "id": credential.id,
+        "name": credential.name,
+        "resource_id": credential.resource_id
+    }
+    
+    # Soft delete
+    credential.is_active = False
+    db.commit()
+    
+    # Log credential deletion
+    create_audit_log(
+        db=db,
+        admin_user_id=current_user.id,
+        action="Credential deleted",
+        action_type="credential_delete",
+        details=credential_info,
+        request=request,
+        resource_id=credential.resource_id,
+        severity="warning"
+    )
+    
+    return {"message": "Credential deleted successfully"}
+
+@app.post("/api/credentials/{credential_id}/rotate")
+def rotate_credential(
+    credential_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user),
+    request: Request = None
+):
+    """Rotate a credential (placeholder for credential rotation logic)"""
+    credential = db.query(Credential).filter(
+        Credential.id == credential_id,
+        Credential.is_active == True
+    ).first()
+    
+    if not credential:
+        raise HTTPException(
+            status_code=404,
+            detail="Credential not found"
+        )
+    
+    # TODO: Implement actual credential rotation logic
+    # This would involve generating new credentials and updating the target system
+    
+    credential.last_rotated_at = datetime.utcnow()
+    db.commit()
+    
+    # Log credential rotation
+    create_audit_log(
+        db=db,
+        admin_user_id=current_user.id,
+        action="Credential rotation initiated",
+        action_type="credential_rotate",
+        details={
+            "credential_id": credential_id,
+            "resource_id": credential.resource_id,
+            "credential_name": credential.name
+        },
+        request=request,
+        resource_id=credential.resource_id,
+        severity="info"
+    )
+    
+    return {"message": "Credential rotation initiated successfully"}
 
 # User Management Endpoints
 @app.post("/users/", response_model=UserResponse)
@@ -876,6 +1672,26 @@ def trigger_background_health_check_all(
     
     return {"message": "Background health check for all resources started"}
 
+# Session recording endpoints (placeholder)
+@app.post("/api/resources/{resource_id}/start-recording")
+async def start_session_recording(
+    resource_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    # TODO: Implement session recording logic
+    # This would integrate with ttyrec/asciinema
+    return {"message": "Session recording started", "session_id": "12345"}
+
+@app.post("/api/resources/{resource_id}/stop-recording")
+async def stop_session_recording(
+    resource_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    # TODO: Implement session recording stop logic
+    return {"message": "Session recording stopped"}
+
 # Legacy resource endpoints (keep for backward compatibility)
 @app.post("/resources/", response_model=ResourceResponse)
 def create_resource_legacy(
@@ -1223,6 +2039,201 @@ def get_audit_log_stats(
         "severity_stats": dict(severity_stats),
         "recent_activity_24h": recent_activity
     }
+
+@app.delete("/api/credentials/{credential_id}")
+def delete_credential(
+    credential_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user),
+    request: Request = None
+):
+    """Delete a credential (soft delete)"""
+    try:
+        credential = db.query(Credential).filter(
+            Credential.id == credential_id,
+            Credential.is_active == True
+        ).first()
+        
+        if not credential:
+            raise HTTPException(
+                status_code=404,
+                detail="Credential not found"
+            )
+        
+        # Store credential info for audit log
+        credential_info = {
+            "id": credential.id,
+            "name": credential.name,
+            "resource_id": credential.resource_id,
+            "username": credential.username
+        }
+        
+        # Soft delete the credential
+        credential.is_active = False
+        credential.updated_at = datetime.utcnow()
+        db.commit()
+        
+        # Log credential deletion
+        create_audit_log(
+            db=db,
+            admin_user_id=current_user.id,
+            action="Credential deleted",
+            action_type="credential_delete",
+            details=credential_info,
+            request=request,
+            resource_id=credential.resource_id,
+            severity="warning"
+        )
+        
+        return {"message": "Credential deleted successfully"}
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting credential: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Internal server error while deleting credential"
+        )
+
+@app.delete("/api/resources/{resource_id}/credentials/{credential_id}")
+def delete_resource_credential(
+    resource_id: int,
+    credential_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user),
+    request: Request = None
+):
+    """Delete a credential for a specific resource"""
+    try:
+        # Verify resource exists
+        resource = db.query(Resource).filter(
+            Resource.id == resource_id,
+            Resource.is_active == True
+        ).first()
+        
+        if not resource:
+            raise HTTPException(
+                status_code=404,
+                detail="Resource not found"
+            )
+        
+        # Find and delete the credential
+        credential = db.query(Credential).filter(
+            Credential.id == credential_id,
+            Credential.resource_id == resource_id,
+            Credential.is_active == True
+        ).first()
+        
+        if not credential:
+            raise HTTPException(
+                status_code=404,
+                detail="Credential not found for this resource"
+            )
+        
+        # Store credential info for audit log
+        credential_info = {
+            "id": credential.id,
+            "name": credential.name,
+            "username": credential.username
+        }
+        
+        # Soft delete
+        credential.is_active = False
+        credential.updated_at = datetime.utcnow()
+        db.commit()
+        
+        # Log deletion
+        create_audit_log(
+            db=db,
+            admin_user_id=current_user.id,
+            action="Resource credential deleted",
+            action_type="credential_delete",
+            details=credential_info,
+            request=request,
+            resource_id=resource_id,
+            severity="warning"
+        )
+        
+        return {"message": "Credential deleted successfully"}
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting resource credential: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Internal server error while deleting credential"
+        )
+
+@app.post("/api/resources/{resource_id}/test-ssh")
+async def test_ssh_connection(
+    resource_id: int,
+    credential_id: int = Query(..., description="Credential ID to test"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Test SSH connection with specific credential"""
+    try:
+        # Get resource and credential
+        resource = db.query(Resource).filter(
+            Resource.id == resource_id,
+            Resource.is_active == True
+        ).first()
+        
+        if not resource:
+            raise HTTPException(status_code=404, detail="Resource not found")
+        
+        credential = db.query(Credential).filter(
+            Credential.id == credential_id,
+            Credential.resource_id == resource_id,
+            Credential.is_active == True
+        ).first()
+        
+        if not credential:
+            raise HTTPException(status_code=404, detail="Credential not found")
+        
+        # Get decrypted credentials
+        ssh_username = credential.username
+        ssh_password = None
+        ssh_private_key = None
+
+        if credential.encrypted_password:
+            ssh_password = decrypt_credential(credential.encrypted_password)
+        
+        if credential.encrypted_private_key:
+            ssh_private_key = decrypt_credential(credential.encrypted_private_key)
+        
+        # Test connection
+        try:
+            if ssh_private_key:
+                conn = await ssh_service.connect_with_private_key(
+                    resource.hostname, resource.port or 22, ssh_username, ssh_private_key
+                )
+            else:
+                conn = await ssh_service.connect_with_password(
+                    resource.hostname, resource.port or 22, ssh_username, ssh_password
+                )
+            
+            # Test command execution
+            result = await conn.run('echo "SSH test successful"')
+            await conn.close()
+            
+            return {
+                "success": True,
+                "message": "SSH connection test successful",
+                "output": result.stdout.strip()
+            }
+            
+        except Exception as ssh_error:
+            return {
+                "success": False,
+                "message": f"SSH connection failed: {str(ssh_error)}"
+            }
+    
+    except Exception as e:
+        logger.error(f"SSH test error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Test failed: {str(e)}")
 
 # Health check endpoint
 @app.get("/health")

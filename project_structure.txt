@@ -23,18 +23,29 @@ Frontend:
         - route.ts
       - resources/
         - route.ts
+        - [resourceId]/
+          - route.ts
+          - credentials/
+            - route.ts
+            - [credentialId]/
+              - route.ts
+      - terminal/
+        - route.ts
     - dashboard/
       - page.tsx
     - login/
       - page.tsx
     - signup/
       - page.tsx
-- public/
-  - file.svg
-  - globe.svg
-  - next.svg
-  - vercel.svg
-  - window.svg
+    - terminal/
+      - [resourceId]/
+        - page.tsx
+  - public/
+    - file.svg
+    - globe.svg
+    - next.svg
+    - vercel.svg
+    - window.svg
 
 Backend:
 - .env
@@ -53,3 +64,5 @@ Backend:
   - main.py
   - models.py
   - schemas.py
+  - tasks.py
+  - health_check.py

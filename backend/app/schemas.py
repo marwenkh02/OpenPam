@@ -1,7 +1,14 @@
-from pydantic import BaseModel, EmailStr, validator, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator, validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from enum import Enum
+
+# Add this CredentialType Enum
+class CredentialType(str, Enum):
+    PASSWORD = "password"
+    SSH_KEY = "ssh_key"
+    API_KEY = "api_key"
+    TOKEN = "token"
 
 class UserCreate(BaseModel):
     username: str = Field(..., min_length=3, max_length=50)
@@ -256,6 +263,60 @@ class AuditLogFilter(BaseModel):
     resource_id: Optional[int] = None
     limit: int = 100
     offset: int = 0
+
+# Add these credential schemas
+class CredentialBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    type: CredentialType
+    username: str = Field(..., min_length=1, max_length=100)
+    password: Optional[str] = Field(None, description="Password (only for creation)")
+    private_key: Optional[str] = Field(None, description="Private key (only for creation)")
+
+    @field_validator("password", "private_key")
+    def validate_credential_data(cls, v, info):
+        values = info.data
+        if "type" in values:
+            if values["type"] == CredentialType.PASSWORD and not v:
+                raise ValueError("Password is required for password type credentials")
+            elif values["type"] == CredentialType.SSH_KEY and not v:
+                raise ValueError("Private key is required for SSH key type credentials")
+        return v
+
+    @field_validator("password", "private_key", mode="before")
+    def validate_mutual_exclusivity(cls, v, info):
+        values = info.data
+        if "type" in values:
+            if values["type"] == CredentialType.PASSWORD and info.field_name == "private_key" and v:
+                raise ValueError("Private key should not be provided for password type credentials")
+            elif values["type"] == CredentialType.SSH_KEY and info.field_name == "password" and v:
+                raise ValueError("Password should not be provided for SSH key type credentials")
+        return v
+
+class CredentialCreate(CredentialBase):
+    resource_id: int
+
+class CredentialUpdate(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    type: Optional[CredentialType] = None
+    username: Optional[str] = Field(None, min_length=1, max_length=100)
+    password: Optional[str] = Field(None, description="New password")
+    private_key: Optional[str] = Field(None, description="New private key")
+    rotation_interval_days: Optional[int] = Field(None, ge=1, le=365)
+
+class CredentialResponse(BaseModel):
+    id: int
+    resource_id: int
+    name: str
+    type: str
+    username: str
+    is_active: bool
+    last_rotated_at: Optional[datetime]
+    rotation_interval_days: Optional[int]
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
 
 # Update forward references
 AccessRequestResponse.update_forward_refs()

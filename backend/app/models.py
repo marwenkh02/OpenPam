@@ -38,11 +38,17 @@ class CriticalityLevel(enum.Enum):
     MEDIUM = "medium"
     HIGH = "high"
 
+class CredentialType(enum.Enum):
+    PASSWORD = "password"
+    SSH_KEY = "ssh_key"
+    API_KEY = "api_key"
+    TOKEN = "token"
+
 class Role(Base):
     __tablename__ = "roles"
 
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, unique=True, nullable=False)  # admin, auditor, dev, ops
+    name = Column(String, unique=True, nullable=False)
     description = Column(String, nullable=True)
 
     users = relationship("User", back_populates="role")
@@ -73,13 +79,12 @@ class User(Base):
     role_id = Column(Integer, ForeignKey("roles.id"), nullable=True)
     role = relationship("Role", back_populates="users")
     
-    # Relationships
+    # Relationships - FIXED: Use backref instead of back_populates for circular dependencies
     access_requests = relationship("AccessRequest", back_populates="user", foreign_keys="AccessRequest.user_id")
     approved_requests = relationship("AccessRequest", back_populates="approver", foreign_keys="AccessRequest.approved_by")
     sessions = relationship("UserSession", back_populates="user")
     audit_logs = relationship("AuditLog", back_populates="user", foreign_keys="AuditLog.user_id")
     admin_audit_logs = relationship("AuditLog", back_populates="admin_user", foreign_keys="AuditLog.admin_user_id")
-    rotation_history = relationship("RotationHistory", back_populates="user")
 
 class UserSession(Base):
     __tablename__ = "user_sessions"
@@ -100,17 +105,17 @@ class Resource(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False, unique=True)
-    type = Column(String, nullable=False)  # ssh, db, api, etc.
+    type = Column(String, nullable=False)
     hostname = Column(String, nullable=False)
     port = Column(Integer, nullable=True)
     description = Column(String, nullable=True)
-    criticality = Column(String, default="medium")  # low, medium, high
+    criticality = Column(String, default="medium")
     is_active = Column(Boolean, default=True)
     
-    # New health monitoring fields
+    # Health monitoring fields
     is_online = Column(Boolean, default=False)
     last_checked_at = Column(DateTime, nullable=True)
-    check_interval = Column(Integer, default=300)  # 5 minutes in seconds
+    check_interval = Column(Integer, default=300)
     
     access_requests = relationship("AccessRequest", back_populates="resource")
     credentials = relationship("Credential", back_populates="resource")
@@ -124,23 +129,10 @@ class ResourceCheck(Base):
     resource_id = Column(Integer, ForeignKey("resources.id"))
     checked_at = Column(DateTime, default=datetime.utcnow)
     is_online = Column(Boolean, default=False)
-    response_time = Column(Integer, nullable=True)  # milliseconds
+    response_time = Column(Integer, nullable=True)
     error_message = Column(String, nullable=True)
     
     resource = relationship("Resource", back_populates="resource_checks")
-
-class Credential(Base):
-    __tablename__ = "credentials"
-
-    id = Column(Integer, primary_key=True, index=True)
-    resource_id = Column(Integer, ForeignKey("resources.id"), nullable=False)
-    vault_path = Column(String, nullable=False)  # reference to Vault secret
-    type = Column(String, nullable=False)  # password, ssh_key, api_key
-    last_rotated_at = Column(DateTime, default=datetime.utcnow)
-    rotation_interval_days = Column(Integer, default=7)
-
-    resource = relationship("Resource", back_populates="credentials")
-    rotation_history = relationship("RotationHistory", back_populates="credential")
 
 class AccessRequest(Base):
     __tablename__ = "access_requests"
@@ -149,7 +141,7 @@ class AccessRequest(Base):
     user_id = Column(Integer, ForeignKey("users.id"))
     resource_id = Column(Integer, ForeignKey("resources.id"))
     reason = Column(Text, nullable=True)
-    status = Column(String, default="pending")  # pending, approved, rejected, expired
+    status = Column(String, default="pending")
     requested_at = Column(DateTime, default=datetime.utcnow)
     approved_at = Column(DateTime, nullable=True)
     approved_by = Column(Integer, ForeignKey("users.id"), nullable=True)
@@ -170,7 +162,7 @@ class RecordedSession(Base):
     resource_id = Column(Integer, ForeignKey("resources.id"))
     started_at = Column(DateTime, default=datetime.utcnow)
     ended_at = Column(DateTime, nullable=True)
-    recording_path = Column(String, nullable=True)  # path to ttyrec/asciinema file
+    recording_path = Column(String, nullable=True)
     suspicious_detected = Column(Boolean, default=False)
 
     user = relationship("User")
@@ -185,7 +177,7 @@ class SuspiciousCommand(Base):
     session_id = Column(Integer, ForeignKey("recorded_sessions.id"))
     command = Column(String, nullable=False)
     timestamp = Column(DateTime, default=datetime.utcnow)
-    severity = Column(String, default="medium")  # low, medium, high
+    severity = Column(String, default="medium")
 
     session = relationship("RecordedSession", back_populates="suspicious_commands")
 
@@ -193,22 +185,42 @@ class AuditLog(Base):
     __tablename__ = "audit_logs"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # User who performed the action
-    admin_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # Admin who performed admin action
-    action = Column(String, nullable=False)  # "login", "create_request", "approve_request", etc.
-    action_type = Column(String, nullable=False)  # From AuditActionType enum
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    admin_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    action = Column(String, nullable=False)
+    action_type = Column(String, nullable=False)
     details = Column(JSON, nullable=True)
     ip_address = Column(String, nullable=True)
     user_agent = Column(String, nullable=True)
     timestamp = Column(DateTime, default=datetime.utcnow)
     access_request_id = Column(Integer, ForeignKey("access_requests.id"), nullable=True)
     resource_id = Column(Integer, ForeignKey("resources.id"), nullable=True)
-    severity = Column(String, default="info")  # info, warning, critical
+    severity = Column(String, default="info")
 
     user = relationship("User", back_populates="audit_logs", foreign_keys=[user_id])
     admin_user = relationship("User", back_populates="admin_audit_logs", foreign_keys=[admin_user_id])
     access_request = relationship("AccessRequest", back_populates="audit_logs")
     resource = relationship("Resource")
+
+class Credential(Base):
+    __tablename__ = "credentials"
+
+    id = Column(Integer, primary_key=True, index=True)
+    resource_id = Column(Integer, ForeignKey("resources.id"), nullable=False)
+    name = Column(String, nullable=False)
+    type = Column(String, nullable=False)  # 'password', 'ssh_key', etc.
+    username = Column(String, nullable=True)
+    encrypted_password = Column(String, nullable=True)
+    encrypted_private_key = Column(String, nullable=True)
+    vault_path = Column(String, nullable=True)
+    is_active = Column(Boolean, default=True)
+    last_rotated_at = Column(DateTime, default=datetime.utcnow)
+    rotation_interval_days = Column(Integer, default=30)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    resource = relationship("Resource", back_populates="credentials")
+    rotation_history = relationship("RotationHistory", back_populates="credential")
 
 class RotationHistory(Base):
     __tablename__ = "rotation_history"
@@ -216,9 +228,9 @@ class RotationHistory(Base):
     id = Column(Integer, primary_key=True, index=True)
     credential_id = Column(Integer, ForeignKey("credentials.id"))
     rotated_at = Column(DateTime, default=datetime.utcnow)
-    rotated_by = Column(Integer, ForeignKey("users.id"), nullable=True)  # system or admin
-    status = Column(String, default="success")  # success, failed
+    rotated_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    status = Column(String, default="success")
     details = Column(String, nullable=True)
 
     credential = relationship("Credential", back_populates="rotation_history")
-    user = relationship("User", back_populates="rotation_history")
+    user = relationship("User")  # Simplified relationship without back_populates

@@ -91,6 +91,16 @@ interface HealthCheckResponse {
   checked_at: string;
 }
 
+interface Credential {
+  id: number;
+  name: string;
+  type: string;
+  username: string;
+  resource_id: number;
+  created_at: string;
+  updated_at: string;
+}
+
 export default function Dashboard() {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
@@ -109,6 +119,18 @@ export default function Dashboard() {
   });
   const [submitting, setSubmitting] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+
+  // Credential Management State
+  const [showCredentialModal, setShowCredentialModal] = useState(false);
+  const [selectedResourceForCredential, setSelectedResourceForCredential] = useState<Resource | null>(null);
+  const [credentials, setCredentials] = useState<Credential[]>([]);
+  const [newCredential, setNewCredential] = useState({
+    name: '',
+    type: 'password',
+    username: '',
+    password: '',
+    private_key: ''
+  });
   
   // Resource Management State
   const [showCreateResourceModal, setShowCreateResourceModal] = useState(false);
@@ -151,6 +173,8 @@ export default function Dashboard() {
   const [selectedResourceForHistory, setSelectedResourceForHistory] = useState<Resource | null>(null);
 
   const router = useRouter();
+
+  
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -233,6 +257,188 @@ export default function Dashboard() {
     }
   };
 
+  const fetchCredentials = async (resourceId: number) => {
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch(`/api/resources/${resourceId}/credentials`, {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        setCredentials(data);
+      } else {
+        console.error('Failed to fetch credentials');
+      }
+    } catch (err) {
+      console.error('Failed to fetch credentials:', err);
+    }
+  };
+
+  
+
+  const validatePrivateKey = (privateKey: string): boolean => {
+  if (!privateKey) return false;
+  
+  // Check for proper BEGIN and END markers
+  const hasBeginMarker = privateKey.includes('-----BEGIN');
+  const hasEndMarker = privateKey.includes('-----END');
+  const hasKeyContent = privateKey.length > 100; // Basic length check
+  
+  if (!hasBeginMarker || !hasEndMarker) {
+    console.error('Private key missing BEGIN/END markers');
+    return false;
+  }
+  
+  if (!hasKeyContent) {
+    console.error('Private key too short');
+    return false;
+  }
+  
+  return true;
+};
+
+const handleCreateCredential = async (e: React.FormEvent) => {
+  e.preventDefault();
+  if (!selectedResourceForCredential) return;
+
+  setSubmitting(true);
+  setError('');
+
+  try {
+    // Basic validation
+    if (!newCredential.name.trim()) {
+      throw new Error('Credential name is required');
+    }
+    if (!newCredential.username.trim()) {
+      throw new Error('Username is required');
+    }
+    if (newCredential.type === 'password' && !newCredential.password) {
+      throw new Error('Password is required for password type credentials');
+    }
+    if (newCredential.type === 'ssh_key' && !newCredential.private_key) {
+      throw new Error('Private key is required for SSH key type credentials');
+    }
+    if (newCredential.type === 'ssh_key' && !validatePrivateKey(newCredential.private_key)) {
+      throw new Error('Private key format is invalid. It should start with -----BEGIN and end with -----END');
+    }
+
+    const token = localStorage.getItem('token');
+    
+    // Prepare the request data - DO NOT base64 encode the private key!
+    const requestData: any = {
+      name: newCredential.name.trim(),
+      type: newCredential.type,
+      username: newCredential.username.trim(),
+      resource_id: selectedResourceForCredential.id
+    };
+
+    // Only include password or private_key based on type
+    if (newCredential.type === 'password') {
+      requestData.password = newCredential.password;
+    } else if (newCredential.type === 'ssh_key') {
+      // Send the private key as raw text, NOT base64 encoded
+      requestData.private_key = newCredential.private_key;
+      
+      // Debug: log the private key format
+      console.log('Private key being sent:', requestData.private_key.substring(0, 100) + '...');
+    }
+
+    console.log('Sending credential data:', requestData);
+
+    const response = await fetch(`/api/resources/${selectedResourceForCredential.id}/credentials`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify(requestData),
+    });
+
+    console.log('Response status:', response.status);
+    
+    if (!response.ok) {
+      const errorData = await response.json();
+      console.error('Error response:', errorData);
+      
+      let errorMessage = 'Failed to create credential';
+      if (errorData.detail) {
+        if (Array.isArray(errorData.detail)) {
+          errorMessage = errorData.detail.map((err: any) => err.msg).join(', ');
+        } else if (typeof errorData.detail === 'string') {
+          errorMessage = errorData.detail;
+        } else if (errorData.detail.msg) {
+          errorMessage = errorData.detail.msg;
+        }
+      } else if (errorData.error) {
+        errorMessage = errorData.error;
+      }
+      
+      throw new Error(errorMessage);
+    }
+
+    const result = await response.json();
+    console.log('Success response:', result);
+
+    setShowCredentialModal(false);
+    setNewCredential({
+      name: '',
+      type: 'password',
+      username: '',
+      password: '',
+      private_key: ''
+    });
+    setSuccess('Credential created successfully!');
+    
+    // Refresh credentials list
+    fetchCredentials(selectedResourceForCredential.id);
+    
+    setTimeout(() => setSuccess(''), 3000);
+  } catch (err: any) {
+    console.error('Error in handleCreateCredential:', err);
+    setError(err.message || 'Failed to create credential');
+  } finally {
+    setSubmitting(false);
+  }
+};
+
+  const handleDeleteCredential = async (credentialId: number, resourceId: number) => {
+  try {
+    const token = localStorage.getItem('token');
+    const response = await fetch(`/api/resources/${resourceId}/credentials/${credentialId}`, {
+      method: 'DELETE',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.error || 'Failed to delete credential');
+    }
+
+    setSuccess('Credential deleted successfully!');
+    
+    // Refresh credentials list
+    if (selectedResourceForCredential) {
+      await fetchCredentials(selectedResourceForCredential.id);
+    }
+    
+    setTimeout(() => setSuccess(''), 3000);
+  } catch (err: any) {
+    setError(err.message || 'Failed to delete credential');
+  }
+};
+
+  const openCredentialModal = async (resource: Resource) => {
+    setSelectedResourceForCredential(resource);
+    setShowCredentialModal(true);
+    await fetchCredentials(resource.id);
+  };
+
   // Health Monitoring Functions
   const checkResourceHealth = async (resourceId: number) => {
     setCheckingResources(prev => new Set(prev).add(resourceId));
@@ -280,6 +486,8 @@ export default function Dashboard() {
       });
     }
   };
+
+  
 
   const checkAllResourcesHealth = async () => {
     setCheckingResources(new Set(resources.map(r => r.id)));
@@ -857,6 +1065,19 @@ export default function Dashboard() {
     return auditStats.severity_stats[severity] || 0;
   };
 
+  // Helper function to check if user has access to a resource
+  const hasAccessToResource = (resourceId: number) => {
+    if (user?.is_admin) return true;
+    
+    const request = myAccessRequests.find(req => 
+      req.resource_id === resourceId && 
+      req.status === 'approved' && 
+      new Date(req.expires_at) > new Date()
+    );
+    
+    return !!request;
+  };
+
   // Responsive table component for mobile
   const MobileRequestCard = ({ request, showActions = false }: { request: AccessRequest, showActions?: boolean }) => (
     <div className="bg-white rounded-lg shadow-sm border p-4 mb-3">
@@ -909,87 +1130,110 @@ export default function Dashboard() {
   );
 
   // Mobile Resource Card for responsive view
-  const MobileResourceCard = ({ resource, showAdminActions = false }: { resource: Resource, showAdminActions?: boolean }) => (
-    <div className="bg-white rounded-lg shadow-sm border p-4 mb-3">
-      <div className="space-y-3">
-        <div className="flex justify-between items-start">
-          <div>
-            <h4 className="font-semibold text-gray-900 text-sm">{resource.name}</h4>
-            <p className="text-xs text-gray-500">{resource.hostname}:{resource.port || 'default'}</p>
+  const MobileResourceCard = ({ resource, showAdminActions = false }: { resource: Resource, showAdminActions?: boolean }) => {
+    const request = myAccessRequests.find(req => req.resource_id === resource.id);
+    const hasAccess = hasAccessToResource(resource.id);
+
+    return (
+      <div className="bg-white rounded-lg shadow-sm border p-4 mb-3">
+        <div className="space-y-3">
+          <div className="flex justify-between items-start">
+            <div>
+              <h4 className="font-semibold text-gray-900 text-sm">{resource.name}</h4>
+              <p className="text-xs text-gray-500">{resource.hostname}:{resource.port || 'default'}</p>
+            </div>
+            <div className="flex flex-col items-end space-y-1">
+              <span className={getTypeBadge(resource.type)}>
+                {resource.type.toUpperCase()}
+              </span>
+              <span className={getCriticalityBadge(resource.criticality)}>
+                {resource.criticality}
+              </span>
+            </div>
           </div>
-          <div className="flex flex-col items-end space-y-1">
-            <span className={getTypeBadge(resource.type)}>
-              {resource.type.toUpperCase()}
+          
+          <div className="flex justify-between items-center">
+            <StatusBadge resource={resource} />
+            <span className="text-xs text-gray-500">
+              {resource.last_checked_at 
+                ? new Date(resource.last_checked_at).toLocaleString()
+                : 'Never checked'
+              }
             </span>
-            <span className={getCriticalityBadge(resource.criticality)}>
-              {resource.criticality}
-            </span>
           </div>
-        </div>
-        
-        <div className="flex justify-between items-center">
-          <StatusBadge resource={resource} />
-          <span className="text-xs text-gray-500">
-            {resource.last_checked_at 
-              ? new Date(resource.last_checked_at).toLocaleString()
-              : 'Never checked'
-            }
-          </span>
-        </div>
-        
-        {resource.description && (
-          <div className="text-sm text-gray-600">
-            <p className="line-clamp-2">{resource.description}</p>
-          </div>
-        )}
-        
-        <div className="flex space-x-2">
-          {!showAdminActions ? (
-            <button
-              onClick={() => {
-                setNewRequest({
-                  ...newRequest,
-                  resource_id: resource.id.toString()
-                });
-                setShowRequestModal(true);
-              }}
-              className="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-2 px-3 rounded text-sm font-medium"
-            >
-              Request Access
-            </button>
-          ) : (
-            <>
-              <button
-                onClick={() => checkResourceHealth(resource.id)}
-                disabled={checkingResources.has(resource.id)}
-                className="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-2 px-3 rounded text-sm font-medium disabled:opacity-50"
-              >
-                {checkingResources.has(resource.id) ? 'Checking...' : 'Check Health'}
-              </button>
-              <button
-                onClick={() => viewCheckHistory(resource)}
-                className="flex-1 bg-green-600 hover:bg-green-700 text-white py-2 px-3 rounded text-sm font-medium"
-              >
-                History
-              </button>
-              <button
-                onClick={() => openEditResourceModal(resource)}
-                className="flex-1 bg-yellow-600 hover:bg-yellow-700 text-white py-2 px-3 rounded text-sm font-medium"
-              >
-                Edit
-              </button>
-              <button
-                onClick={() => openDeleteResourceModal(resource)}
-                className="flex-1 bg-red-600 hover:bg-red-700 text-white py-2 px-3 rounded text-sm font-medium"
-              >
-                Delete
-              </button>
-            </>
+          
+          {resource.description && (
+            <div className="text-sm text-gray-600">
+              <p className="line-clamp-2">{resource.description}</p>
+            </div>
           )}
+          
+          <div className="flex space-x-2">
+            {!showAdminActions ? (
+              <>
+                {hasAccess && resource.type === 'ssh' && (
+                  <button
+                    onClick={() => router.push(`/terminal/${resource.id}`)}
+                    className="flex-1 bg-green-600 hover:bg-green-700 text-white py-2 px-3 rounded text-sm font-medium"
+                  >
+                    Connect
+                  </button>
+                )}
+                {!hasAccess && (
+                  <button
+                    onClick={() => {
+                      setNewRequest({
+                        ...newRequest,
+                        resource_id: resource.id.toString()
+                      });
+                      setShowRequestModal(true);
+                    }}
+                    className="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-2 px-3 rounded text-sm font-medium"
+                  >
+                    Request Access
+                  </button>
+                )}
+              </>
+            ) : (
+              <>
+                <button
+                  onClick={() => checkResourceHealth(resource.id)}
+                  disabled={checkingResources.has(resource.id)}
+                  className="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-2 px-3 rounded text-sm font-medium disabled:opacity-50"
+                >
+                  {checkingResources.has(resource.id) ? 'Checking...' : 'Check Health'}
+                </button>
+                <button
+                  onClick={() => viewCheckHistory(resource)}
+                  className="flex-1 bg-green-600 hover:bg-green-700 text-white py-2 px-3 rounded text-sm font-medium"
+                >
+                  History
+                </button>
+                <button
+                  onClick={() => openEditResourceModal(resource)}
+                  className="flex-1 bg-yellow-600 hover:bg-yellow-700 text-white py-2 px-3 rounded text-sm font-medium"
+                >
+                  Edit
+                </button>
+                <button
+                  onClick={() => openCredentialModal(resource)}
+                  className="flex-1 bg-purple-600 hover:bg-purple-700 text-white py-2 px-3 rounded text-sm font-medium"
+                >
+                  Credentials
+                </button>
+                <button
+                  onClick={() => openDeleteResourceModal(resource)}
+                  className="flex-1 bg-red-600 hover:bg-red-700 text-white py-2 px-3 rounded text-sm font-medium"
+                >
+                  Delete
+                </button>
+              </>
+            )}
+          </div>
         </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   if (loading) {
     return (
@@ -1344,87 +1588,123 @@ export default function Dashboard() {
                           </tr>
                         </thead>
                         <tbody className="bg-white divide-y divide-gray-200">
-                          {resources.map((resource) => (
-                            <tr key={resource.id} className="hover:bg-gray-50">
-                              <td className="px-6 py-4 whitespace-nowrap">
-                                <div className="text-sm font-medium text-gray-900">
-                                  {resource.name}
-                                </div>
-                              </td>
-                              <td className="px-6 py-4 whitespace-nowrap">
-                                <span className={getTypeBadge(resource.type)}>
-                                  {resource.type.toUpperCase()}
-                                </span>
-                              </td>
-                              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                                {resource.hostname}:{resource.port || '-'}
-                              </td>
-                              <td className="px-6 py-4 whitespace-nowrap">
-                                <StatusBadge resource={resource} />
-                              </td>
-                              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                                {resource.last_checked_at 
-                                  ? new Date(resource.last_checked_at).toLocaleString()
-                                  : 'Never'
-                                }
-                              </td>
-                              <td className="px-6 py-4 whitespace-nowrap">
-                                <span className={getCriticalityBadge(resource.criticality)}>
-                                  {resource.criticality}
-                                </span>
-                              </td>
-                              <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                                <div className="flex space-x-2">
-                                  {user?.is_admin ? (
-                                    <>
-                                      <button
-                                        onClick={() => checkResourceHealth(resource.id)}
-                                        disabled={checkingResources.has(resource.id)}
-                                        className="text-blue-600 hover:text-blue-900 disabled:opacity-50"
-                                        title="Check Health"
-                                      >
-                                        🔍
-                                      </button>
-                                      <button
-                                        onClick={() => viewCheckHistory(resource)}
-                                        className="text-green-600 hover:text-green-900"
-                                        title="View History"
-                                      >
-                                        📊
-                                      </button>
-                                      <button
-                                        onClick={() => openEditResourceModal(resource)}
-                                        className="text-yellow-600 hover:text-yellow-900"
-                                        title="Edit"
-                                      >
-                                        ✏️
-                                      </button>
-                                      <button
-                                        onClick={() => openDeleteResourceModal(resource)}
-                                        className="text-red-600 hover:text-red-900"
-                                        title="Delete"
-                                      >
-                                        🗑️
-                                      </button>
-                                    </>
-                                  ) : (
-                                    <button
-                                      onClick={() => {
-                                        setNewRequest({
-                                          ...newRequest,
-                                          resource_id: resource.id.toString()
-                                        });
-                                        setShowRequestModal(true);
-                                      }}
-                                      className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded text-sm"
-                                    >
-                                      Request Access
-                                    </button>
-                                  )}
-                                </div>
-                              </td>
-                            </tr>
-                          ))}
+                          {resources.map((resource) => {
+                            const request = myAccessRequests.find(req => req.resource_id === resource.id);
+                            const hasAccess = hasAccessToResource(resource.id);
+
+                            return (
+                              <tr key={resource.id} className="hover:bg-gray-50">
+                                <td className="px-6 py-4 whitespace-nowrap">
+                                  <div className="text-sm font-medium text-gray-900">
+                                    {resource.name}
+                                  </div>
+                                </td>
+                                <td className="px-6 py-4 whitespace-nowrap">
+                                  <span className={getTypeBadge(resource.type)}>
+                                    {resource.type.toUpperCase()}
+                                  </span>
+                                </td>
+                                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                                  {resource.hostname}:{resource.port || '-'}
+                                </td>
+                                <td className="px-6 py-4 whitespace-nowrap">
+                                  <StatusBadge resource={resource} />
+                                </td>
+                                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                  {resource.last_checked_at 
+                                    ? new Date(resource.last_checked_at).toLocaleString()
+                                    : 'Never'
+                                  }
+                                </td>
+                                <td className="px-6 py-4 whitespace-nowrap">
+                                  <span className={getCriticalityBadge(resource.criticality)}>
+                                    {resource.criticality}
+                                  </span>
+                                </td>
+                                <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                                  <div className="flex space-x-2">
+                                    {user?.is_admin ? (
+                                      <>
+                                        <button
+                                          onClick={() => checkResourceHealth(resource.id)}
+                                          disabled={checkingResources.has(resource.id)}
+                                          className="text-blue-600 hover:text-blue-900 disabled:opacity-50"
+                                          title="Check Health"
+                                        >
+                                          🔍
+                                        </button>
+                                        <button
+                                          onClick={() => viewCheckHistory(resource)}
+                                          className="text-green-600 hover:text-green-900"
+                                          title="View History"
+                                        >
+                                          📊
+                                        </button>
+                                        <button
+                                          onClick={() => openEditResourceModal(resource)}
+                                          className="text-yellow-600 hover:text-yellow-900"
+                                          title="Edit"
+                                        >
+                                          ✏️
+                                        </button>
+                                        {user?.is_admin && (
+                                          <button
+                                            onClick={() => openCredentialModal(resource)}
+                                            className="text-purple-600 hover:text-purple-900 ml-2"
+                                            title="Manage Credentials"
+                                          >
+                                            🔑
+                                          </button>
+                                        )}
+                                        <button
+                                          onClick={() => openDeleteResourceModal(resource)}
+                                          className="text-red-600 hover:text-red-900"
+                                          title="Delete"
+                                        >
+                                          🗑️
+                                        </button>
+                                        {hasAccess && resource.type === 'ssh' && (
+                                          <button
+                                            onClick={() => router.push(`/terminal/${resource.id}`)}
+                                            className="text-green-600 hover:text-green-900"
+                                            title="Connect via SSH"
+                                          >
+                                            🔌 Connect
+                                          </button>
+                                        )}
+                                      </>
+                                    ) : (
+                                      <>
+                                        {hasAccess && resource.type === 'ssh' && (
+                                          <button
+                                            onClick={() => router.push(`/terminal/${resource.id}`)}
+                                            className="text-green-600 hover:text-green-900 ml-2"
+                                            title="Connect via SSH"
+                                          >
+                                            🔌
+                                          </button>
+                                        )}
+                                        {!hasAccess && (
+                                          <button
+                                            onClick={() => {
+                                              setNewRequest({
+                                                ...newRequest,
+                                                resource_id: resource.id.toString()
+                                              });
+                                              setShowRequestModal(true);
+                                            }}
+                                            className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded text-sm"
+                                          >
+                                            Request Access
+                                          </button>
+                                        )}
+                                      </>
+                                    )}
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
                         </tbody>
                       </table>
                     </div>
@@ -1559,11 +1839,11 @@ export default function Dashboard() {
                 <div className="text-center py-8 sm:py-12">
                   <div className="text-gray-400 mb-4">
                     <svg className="mx-auto h-12 w-12" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M9 12h3.75M9 15h3.75M9 18h3.75m3 .75H18a2.25 2.25 0 002.25-2.25V6.108c0-1.135-.845-2.098-1.976-2.192a48.424 48.424 0 00-1.123-.08m-5.801 0c-.065.21-.1.433-.1.664 0 .414.336.75.75.75h4.5a.75.75 0 00.75-.75 2.25 2.25 0 00-.1-.664m-5.8 0A2.251 2.251 0 0113.5 2.25H15c1.012 0 1.867.668 2.15 1.586m-5.8 0c-.376.023-.75.05-1.124.08C9.095 4.01 8.25 4.973 8.25 6.108V8.25m0 0H4.875c-.621 0-1.125.504-1.125 1.125v11.25c0 .621.504 1.125 1.125 1.125h9.75c.621 0 1.125-.504 1.125-1.125V9.375c0-.621-.504-1.125-1.125-1.125H8.25zM6.75 12h.008v.008H6.75V12zm0 3h.008v.008H6.75V15zm0 3h.008v.008H6.75V18z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                     </svg>
                   </div>
                   <h3 className="text-lg font-medium text-gray-900 mb-2">No access requests</h3>
-                  <p className="text-gray-500 mb-4">You haven't created any access requests yet.</p>
+                  <p className="text-gray-500">You haven't created any access requests yet.</p>
                   <button
                     onClick={() => setShowRequestModal(true)}
                     className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded"
@@ -2094,6 +2374,139 @@ export default function Dashboard() {
                     className="w-full sm:w-auto px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 disabled:opacity-50"
                   >
                     {submitting ? 'Submitting...' : 'Submit Request'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Credential Management Modal */}
+      {showCredentialModal && selectedResourceForCredential && (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full flex items-center justify-center p-4 z-50">
+          <div className="relative bg-white rounded-lg shadow-xl max-w-md w-full mx-auto">
+            <div className="p-6">
+              <h3 className="text-lg font-semibold mb-4">
+                Manage Credentials - {selectedResourceForCredential.name}
+              </h3>
+              
+              {/* Existing Credentials */}
+              <div className="mb-4">
+                <h4 className="font-medium mb-2">Existing Credentials</h4>
+                {credentials.length > 0 ? (
+                  <div className="space-y-2">
+                    {credentials.map(cred => (
+                      <div key={cred.id} className="flex justify-between items-center p-2 bg-gray-50 rounded">
+                        <div>
+                          <span className="font-medium">{cred.name}</span>
+                          <span className="text-sm text-gray-600 ml-2">({cred.type})</span>
+                        </div>
+                          <button
+                          onClick={() => handleDeleteCredential(cred.id, selectedResourceForCredential.id)}
+                          className="text-red-600 hover:text-red-800 text-sm"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-gray-500 text-sm">No credentials configured</p>
+                )}
+              </div>
+
+              {/* Add New Credential Form */}
+              <form onSubmit={handleCreateCredential}>
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Credential Name *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={newCredential.name}
+                      onChange={(e) => setNewCredential({...newCredential, name: e.target.value})}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      placeholder="e.g., admin-user, root-access"
+                    />
+                  </div>
+                  
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Type *
+                    </label>
+                    <select
+                      required
+                      value={newCredential.type}
+                      onChange={(e) => setNewCredential({...newCredential, type: e.target.value})}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      <option value="password">Password</option>
+                      <option value="ssh_key">SSH Key</option>
+                    </select>
+                  </div>
+                  
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Username *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={newCredential.username}
+                      onChange={(e) => setNewCredential({...newCredential, username: e.target.value})}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      placeholder="e.g., root, admin, webuser"
+                    />
+                  </div>
+                  
+                  {newCredential.type === 'password' ? (
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Password *
+                      </label>
+                      <input
+                        type="password"
+                        required
+                        value={newCredential.password}
+                        onChange={(e) => setNewCredential({...newCredential, password: e.target.value})}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        placeholder="SSH password"
+                      />
+                    </div>
+                  ) : (
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Private Key *
+                      </label>
+                      <textarea
+                        required
+                        value={newCredential.private_key}
+                        onChange={(e) => setNewCredential({...newCredential, private_key: e.target.value})}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        rows={6}
+                        placeholder="Paste SSH private key here..."
+                      />
+                    </div>
+                  )}
+                </div>
+                
+                <div className="mt-6 flex justify-end space-x-3">
+                  <button
+                    type="button"
+                    onClick={() => setShowCredentialModal(false)}
+                    className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={submitting}
+                    className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 disabled:opacity-50"
+                  >
+                    {submitting ? 'Creating...' : 'Create Credential'}
                   </button>
                 </div>
               </form>
