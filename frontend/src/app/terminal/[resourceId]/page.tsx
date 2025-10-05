@@ -42,11 +42,9 @@ export default function TerminalPage() {
 
   const resourceId = params.resourceId as string;
 
+  // Initialize terminal
   useEffect(() => {
-    if (resourceId) {
-      initializeTerminal();
-      fetchResourceDetails();
-    }
+    initializeTerminal();
     
     return () => {
       if (websocket) {
@@ -56,7 +54,21 @@ export default function TerminalPage() {
         terminal.dispose();
       }
     };
+  }, []);
+
+  // Fetch resource details and credentials when component mounts
+  useEffect(() => {
+    if (resourceId) {
+      fetchResourceDetails();
+    }
   }, [resourceId]);
+
+  // Connect when credentials are loaded and terminal is ready
+  useEffect(() => {
+    if (terminal && !isLoadingCredentials && resource && status === 'connecting') {
+      connectWebSocket();
+    }
+  }, [terminal, isLoadingCredentials, resource, selectedCredentialId]);
 
   const initializeTerminal = () => {
     // Clean up existing terminal
@@ -74,7 +86,8 @@ export default function TerminalPage() {
       fontSize: 14,
       fontFamily: 'Menlo, Monaco, "Courier New", monospace',
       cols: 80,
-      rows: 24
+      rows: 24,
+      allowProposedApi: true
     });
 
     const fit = new FitAddon();
@@ -87,8 +100,9 @@ export default function TerminalPage() {
       term.open(terminalRef.current);
       fit.fit();
       
-      term.write('\x1b[33mInitializing OpenPAM SSH Terminal...\x1b[0m\r\n');
-      term.write('\x1b[36mEstablishing secure connection...\x1b[0m\r\n\r\n');
+      // Write initial message
+      term.writeln('\x1b[33mInitializing OpenPAM SSH Terminal...\x1b[0m');
+      term.writeln('\x1b[36mEstablishing secure connection...\x1b[0m\r\n');
 
       setTerminal(term);
       setFitAddon(fit);
@@ -175,19 +189,6 @@ export default function TerminalPage() {
     }
   };
 
-  
-  // Auto-connect when terminal is ready and credentials (if any) have loaded
-  useEffect(() => {
-    // Only attempt to connect when:
-    // - terminal is initialized
-    // - we are in 'connecting' state and no websocket exists
-    // - credentials have finished loading (so selectedCredentialId is set if available)
-    if (terminal && !isLoadingCredentials && !websocket && status === 'connecting') {
-      connectWebSocket();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [terminal, isLoadingCredentials, selectedCredentialId]);
-
   const connectWebSocket = () => {
     if (isConnecting || websocket) return;
     
@@ -227,15 +228,15 @@ export default function TerminalPage() {
       setIsConnecting(false);
       
       if (terminal) {
-        terminal.write('\r\n\x1b[32m✓ Connected to OpenPAM gateway\x1b[0m\r\n');
-        terminal.write('\x1b[33mNegotiating SSH connection...\x1b[0m\r\n');
+        terminal.writeln('\r\n\x1b[32m✓ Connected to OpenPAM gateway\x1b[0m');
+        terminal.writeln('\x1b[33mNegotiating SSH connection...\x1b[0m');
         
         // Display credential info if available
         const selectedCredential = availableCredentials.find(
           cred => cred.id.toString() === selectedCredentialId
         );
         if (selectedCredential) {
-          terminal.write(`\x1b[36mUsing credential: ${selectedCredential.name} (${selectedCredential.username})\x1b[0m\r\n`);
+          terminal.writeln(`\x1b[36mUsing credential: ${selectedCredential.name} (${selectedCredential.username})\x1b[0m`);
         }
       }
     };
@@ -248,14 +249,22 @@ export default function TerminalPage() {
         switch (message.type) {
           case 'output':
             if (terminal) {
+              // Write data directly to terminal - this enables real-time display
               terminal.write(message.data);
             }
             break;
           case 'connected':
             console.log('SSH connection established');
             if (terminal) {
-              terminal.write('\r\n\x1b[32m✓ SSH session established\x1b[0m\r\n');
-              terminal.write('\x1b[36mYou are now connected to the remote server\x1b[0m\r\n\r\n');
+              terminal.writeln('\r\n\x1b[32m✓ SSH session established\x1b[0m');
+              terminal.writeln('\x1b[36mYou are now connected to the remote server\x1b[0m\r\n');
+              // Focus the terminal for immediate input
+              terminal.focus();
+            }
+            break;
+          case 'status':
+            if (terminal) {
+              terminal.writeln(`\x1b[33m${message.message}\x1b[0m`);
             }
             break;
           case 'error':
@@ -263,12 +272,12 @@ export default function TerminalPage() {
             setError(message.message);
             setStatus('error');
             if (terminal) {
-              terminal.write(`\r\n\x1b[31m✗ Connection Error: ${message.message}\x1b[0m\r\n`);
-              terminal.write('\x1b[33mCheck if:\x1b[0m\r\n');
-              terminal.write('1. The target server is running and accessible\r\n');
-              terminal.write('2. SSH credentials are properly configured\r\n');
-              terminal.write('3. Your access request is still valid\r\n');
-              terminal.write('4. The selected credential has correct permissions\r\n');
+              terminal.writeln(`\r\n\x1b[31m✗ Connection Error: ${message.message}\x1b[0m`);
+              terminal.writeln('\x1b[33mCheck if:\x1b[0m');
+              terminal.writeln('1. The target server is running and accessible');
+              terminal.writeln('2. SSH credentials are properly configured');
+              terminal.writeln('3. Your access request is still valid');
+              terminal.writeln('4. The selected credential has correct permissions');
             }
             break;
           default:
@@ -292,11 +301,11 @@ export default function TerminalPage() {
         const errorMsg = event.reason || `Connection closed with code ${event.code}`;
         setError(errorMsg);
         if (terminal) {
-          terminal.write(`\r\n\x1b[31m✗ Connection closed: ${errorMsg}\x1b[0m\r\n`);
+          terminal.writeln(`\r\n\x1b[31m✗ Connection closed: ${errorMsg}\x1b[0m`);
         }
       } else {
         if (terminal) {
-          terminal.write('\r\n\x1b[33mSession ended by user\x1b[0m\r\n');
+          terminal.writeln('\r\n\x1b[33mSession ended by user\x1b[0m');
         }
       }
     };
@@ -308,11 +317,11 @@ export default function TerminalPage() {
       setError('WebSocket connection failed. Make sure the backend server is running on port 8000.');
       
       if (terminal) {
-        terminal.write('\r\n\x1b[31m✗ WebSocket connection failed\x1b[0m\r\n');
-        terminal.write('\x1b[33mEnsure backend server is running:\x1b[0m\r\n');
-        terminal.write('1. Check if backend is running on port 8000\r\n');
-        terminal.write('2. Verify CORS settings\r\n');
-        terminal.write('3. Check network connectivity\r\n');
+        terminal.writeln('\r\n\x1b[31m✗ WebSocket connection failed\x1b[0m');
+        terminal.writeln('\x1b[33mEnsure backend server is running:\x1b[0m');
+        terminal.writeln('1. Check if backend is running on port 8000');
+        terminal.writeln('2. Verify CORS settings');
+        terminal.writeln('3. Check network connectivity');
       }
     };
 
@@ -322,6 +331,7 @@ export default function TerminalPage() {
     if (terminal) {
       terminal.onData((data) => {
         if (ws.readyState === WebSocket.OPEN) {
+          // Send input immediately to enable real-time typing
           ws.send(JSON.stringify({
             type: 'input',
             data: data
@@ -339,8 +349,22 @@ export default function TerminalPage() {
         }
       });
 
-      // Focus the terminal
-      terminal.focus();
+      // Handle paste events
+      terminal.onBinary((data) => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            type: 'input',
+            data: data
+          }));
+        }
+      });
+
+      // Focus the terminal immediately
+      setTimeout(() => {
+        if (terminal) {
+          terminal.focus();
+        }
+      }, 100);
     }
   };
 
@@ -350,7 +374,7 @@ export default function TerminalPage() {
     
     // If we're already connected, show a message that credential change requires reconnection
     if (status === 'connected' && terminal) {
-      terminal.write('\r\n\x1b[33mCredential change detected. Reconnect to use new credential.\x1b[0m\r\n');
+      terminal.writeln('\r\n\x1b[33mCredential change detected. Reconnect to use new credential.\x1b[0m');
     }
   };
 
@@ -361,8 +385,14 @@ export default function TerminalPage() {
     }
     setError('');
     setStatus('connecting');
+    
+    // Reinitialize terminal
     initializeTerminal();
-    setTimeout(() => connectWebSocket(), 500);
+    
+    // Small delay before reconnecting
+    setTimeout(() => {
+      connectWebSocket();
+    }, 500);
   };
 
   const handleDisconnect = () => {
@@ -371,7 +401,7 @@ export default function TerminalPage() {
       setWebsocket(null);
     }
     if (terminal) {
-      terminal.write('\r\n\x1b[33mDisconnecting...\x1b[0m\r\n');
+      terminal.writeln('\r\n\x1b[33mDisconnecting...\x1b[0m');
     }
     setTimeout(() => router.push('/dashboard'), 1000);
   };
@@ -400,34 +430,19 @@ export default function TerminalPage() {
     return availableCredentials.find(cred => cred.id.toString() === selectedCredentialId);
   };
 
+  // Handle window resize
   useEffect(() => {
-    const connectToSSH = async () => {
-      if (!resource || !selectedCredentialId || !localStorage.getItem('token')) return;
-
-      try {
-        const selectedCredential = availableCredentials.find(
-          (cred) => cred.id.toString() === selectedCredentialId
-        );
-
-        console.log('🔧 Terminal connection details:', {
-          resource: resource.name,
-          hostname: resource.hostname,
-          port: resource.port || 22,
-          credential: selectedCredential?.name || 'Default',
-          credentialType: selectedCredential?.type || 'N/A',
-        });
-
-        // Your existing WebSocket connection logic
-        connectWebSocket();
-      } catch (error: any) {
-        console.error('💥 SSH connection failed:', error);
-        setStatus('error');
-        setError(`Connection failed: ${error.message || 'Unknown error'}`);
+    const handleResize = () => {
+      if (fitAddon) {
+        fitAddon.fit();
       }
     };
 
-    connectToSSH();
-  }, [resource, selectedCredentialId, availableCredentials]);
+    window.addEventListener('resize', handleResize);
+    return () => {
+      window.removeEventListener('resize', handleResize);
+    };
+  }, [fitAddon]);
 
   return (
     <div className="h-screen flex flex-col bg-gray-900">
@@ -465,7 +480,7 @@ export default function TerminalPage() {
                 className="bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm text-white disabled:opacity-50"
               >
                 {availableCredentials.map((credential) => (
-                  <option key={credential.id} value={credential.id}>
+                  <option key={credential.id} value={credential.id.toString()}>
                     {credential.name} ({credential.username})
                   </option>
                 ))}
@@ -568,6 +583,7 @@ export default function TerminalPage() {
       <div 
         ref={terminalRef} 
         className="flex-1 p-2"
+        onClick={() => terminal?.focus()} // Focus terminal on click
       />
       
       {/* Help Footer */}

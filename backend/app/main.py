@@ -177,6 +177,39 @@ class SSHService:
             logger.error(f"💥 Unexpected SSH key connection error to {hostname}: {str(e)}")
             raise Exception(f"SSH connection failed: {str(e)}")
 
+    async def connect_with_password(self, hostname: str, port: int, username: str, password: str) -> asyncssh.SSHClientConnection:
+        """Connect to SSH using password authentication"""
+        try:
+            logger.info(f"🔑 Attempting SSH password connection to {username}@{hostname}:{port}")
+            
+            conn = await asyncio.wait_for(
+                asyncssh.connect(
+                    hostname,
+                    port=port,
+                    username=username,
+                    password=password,
+                    known_hosts=None,
+                    connect_timeout=15,
+                ),
+                timeout=self.timeout
+            )
+            
+            logger.info(f"✅ SSH password connection established to {hostname}")
+            return conn
+            
+        except asyncssh.PermissionDenied:
+            logger.error(f"❌ SSH password authentication failed for {username}@{hostname}")
+            raise Exception("Password authentication failed - invalid credentials")
+        except asyncio.TimeoutError:
+            logger.error(f"⏰ SSH password connection timeout to {hostname}:{port}")
+            raise Exception(f"Connection timeout to {hostname}")
+        except asyncssh.Error as ssh_error:
+            logger.error(f"🔌 SSH password connection error to {hostname}: {str(ssh_error)}")
+            raise Exception(f"SSH connection failed: {str(ssh_error)}")
+        except Exception as e:
+            logger.error(f"💥 Unexpected SSH password connection error to {hostname}: {str(e)}")
+            raise Exception(f"SSH connection failed: {str(e)}")
+
 ssh_service = SSHService()
 
 # SSH Session Manager Implementation
@@ -363,38 +396,24 @@ class SSHSessionManager:
 
         return ssh_username, ssh_password, ssh_private_key
 
-    async def establish_ssh_connection(self, hostname: str, port: int, username: str, password: str, private_key: str):
-        """Establish SSH connection with better error handling"""
-        try:
-            if private_key:
-                logger.info(f"🔑 Using private key authentication for {username}@{hostname}")
-                # Log key info for debugging
-                logger.info(f"📋 Private key preview: {private_key[:100]}...")
-                return await ssh_service.connect_with_private_key(hostname, port, username, private_key)
-            else:
-                logger.info(f"🔑 Using password authentication for {username}@{hostname}")
-                return await ssh_service.connect_with_password(hostname, port, username, password)
-        except Exception as e:
-            logger.error(f"❌ SSH connection failed: {str(e)}")
-            logger.error(f"🔧 Connection details: {username}@{hostname}:{port}")
-            if private_key:
-                logger.error(f"🔑 Key type: SSH Private Key (length: {len(private_key)})")
-            raise Exception(f"SSH connection failed: {str(e)}")
-
     async def handle_bidirectional_communication(self, websocket: WebSocket, ssh_process, resource_id: int, user_id: int, db: Session):
         """Handle data transfer between WebSocket and SSH process"""
         
         async def read_ssh_output():
             """Read output from SSH process and send to WebSocket"""
             try:
-                async for data in ssh_process.stdout:
+                while True:
+                    # Read data from SSH stdout
+                    data = await ssh_process.stdout.read(1024)
                     if data:
                         await websocket.send_text(json.dumps({
                             "type": "output",
                             "data": data
                         }))
+                    await asyncio.sleep(0.01)  # Small delay to prevent busy waiting
             except Exception as e:
                 logger.error(f"SSH read error: {str(e)}")
+                # Don't re-raise, just break the loop
 
         async def read_websocket_input():
             """Read input from WebSocket and send to SSH process"""
@@ -404,17 +423,24 @@ class SSHSessionManager:
                     message = json.loads(data)
                     
                     if message["type"] == "input":
+                        # Send input directly to SSH process stdin
                         ssh_process.stdin.write(message["data"])
+                        await ssh_process.stdin.drain()  # Ensure data is sent
                     elif message["type"] == "resize":
                         # Handle terminal resize
                         cols = message.get("cols", 80)
                         rows = message.get("rows", 24)
-                        ssh_process.change_terminal_size(cols, rows)
+                        try:
+                            ssh_process.change_terminal_size(cols, rows)
+                        except:
+                            pass  # resize might not be supported
                         
             except WebSocketDisconnect:
                 logger.info("WebSocket client disconnected")
+                raise
             except Exception as e:
                 logger.error(f"WebSocket read error: {str(e)}")
+                raise
 
         # Create tasks for reading from SSH and WebSocket
         read_ssh_task = asyncio.create_task(read_ssh_output())
@@ -426,10 +452,16 @@ class SSHSessionManager:
                 [read_ssh_task, read_websocket_task],
                 return_when=asyncio.FIRST_COMPLETED
             )
+        except Exception as e:
+            logger.error(f"Bidirectional communication error: {str(e)}")
         finally:
             # Cancel pending tasks
             for task in pending:
                 task.cancel()
+
+            # Wait for tasks to complete cancellation
+            if pending:
+                await asyncio.wait(pending, timeout=1.0)
 
             # Log session end
             create_audit_log(
@@ -458,13 +490,27 @@ class SSHSessionManager:
         """Clean up connections"""
         try:
             if ssh_process:
-                ssh_process.close()
+                try:
+                    ssh_process.terminate()
+                    await asyncio.wait_for(ssh_process.wait(), timeout=5.0)
+                except:
+                    try:
+                        ssh_process.close()
+                    except:
+                        pass
             if ssh_conn:
-                ssh_conn.close()
-        except:
-            pass
+                try:
+                    ssh_conn.close()
+                    await ssh_conn.wait_closed()
+                except:
+                    pass
+        except Exception as e:
+            logger.error(f"Error during cleanup: {str(e)}")
         finally:
-            db.close()
+            try:
+                db.close()
+            except:
+                pass
 
 ssh_session_manager = SSHSessionManager()
 
@@ -492,7 +538,7 @@ app = FastAPI(title="OpenPAM Backend", version="1.0.0")
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["http://localhost:3000", "http://localhost:3001"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -555,7 +601,10 @@ async def websocket_ssh_session(websocket: WebSocket, resource_id: int):
         )
     except Exception as e:
         logger.error(f"WebSocket setup failed: {str(e)}")
-        await websocket.close(code=1011)
+        try:
+            await websocket.close(code=1011)
+        except:
+            pass
 
 # Credential Management Endpoints
 @app.post("/api/resources/{resource_id}/credentials", response_model=CredentialResponse)
