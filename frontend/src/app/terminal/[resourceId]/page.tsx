@@ -34,15 +34,16 @@ export default function TerminalPage() {
   const [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'error'>('connecting');
   const [error, setError] = useState('');
   const [isConnecting, setIsConnecting] = useState(false);
+  const [securityWarning, setSecurityWarning] = useState<string | null>(null);
+  const [realtimeWarning, setRealtimeWarning] = useState<string | null>(null);
+  const [blockedCommand, setBlockedCommand] = useState<string | null>(null);
   
-  // Credential management state
   const [availableCredentials, setAvailableCredentials] = useState<Credential[]>([]);
   const [selectedCredentialId, setSelectedCredentialId] = useState<string>('');
   const [isLoadingCredentials, setIsLoadingCredentials] = useState(false);
 
   const resourceId = params.resourceId as string;
 
-  // Initialize terminal
   useEffect(() => {
     initializeTerminal();
     
@@ -56,14 +57,12 @@ export default function TerminalPage() {
     };
   }, []);
 
-  // Fetch resource details and credentials when component mounts
   useEffect(() => {
     if (resourceId) {
       fetchResourceDetails();
     }
   }, [resourceId]);
 
-  // Connect when credentials are loaded and terminal is ready
   useEffect(() => {
     if (terminal && !isLoadingCredentials && resource && status === 'connecting') {
       connectWebSocket();
@@ -71,7 +70,6 @@ export default function TerminalPage() {
   }, [terminal, isLoadingCredentials, resource, selectedCredentialId]);
 
   const initializeTerminal = () => {
-    // Clean up existing terminal
     if (terminal) {
       terminal.dispose();
     }
@@ -94,7 +92,6 @@ export default function TerminalPage() {
     term.loadAddon(fit);
 
     if (terminalRef.current) {
-      // Clear any existing content
       terminalRef.current.innerHTML = '';
       
       term.open(terminalRef.current);
@@ -102,11 +99,173 @@ export default function TerminalPage() {
       
       // Write initial message
       term.writeln('\x1b[33mInitializing OpenPAM SSH Terminal...\x1b[0m');
-      term.writeln('\x1b[36mEstablishing secure connection...\x1b[0m\r\n');
+      term.writeln('\x1b[36mEstablishing secure connection...\x1b[0m');
+      term.writeln('\x1b[35m⚠️  Security: Command monitoring enabled\x1b[0m\r\n');
 
       setTerminal(term);
       setFitAddon(fit);
     }
+  };
+
+  const connectWebSocket = () => {
+    if (isConnecting || websocket) return;
+    
+    setIsConnecting(true);
+    setStatus('connecting');
+    setError('');
+    setSecurityWarning(null);
+    setRealtimeWarning(null);
+    setBlockedCommand(null);
+
+    const token = localStorage.getItem('token');
+    if (!token) {
+      setError('Authentication required');
+      setStatus('error');
+      setIsConnecting(false);
+      router.push('/login');
+      return;
+    }
+
+    const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+    let wsUrl = `${backendUrl.replace('http', 'ws')}/ws/resources/${resourceId}/ssh?token=${token}`;
+    
+    if (selectedCredentialId) {
+      wsUrl += `&credential_id=${selectedCredentialId}`;
+    }
+    
+    const ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+      setStatus('connected');
+      setError('');
+      setIsConnecting(false);
+      
+      if (terminal) {
+        terminal.writeln('\r\n\x1b[32m✓ Connected to OpenPAM gateway\x1b[0m');
+        terminal.writeln('\x1b[33mNegotiating SSH connection...\x1b[0m');
+        
+        const selectedCredential = availableCredentials.find(
+          cred => cred.id.toString() === selectedCredentialId
+        );
+        if (selectedCredential) {
+          terminal.writeln(`\x1b[36mUsing credential: ${selectedCredential.name} (${selectedCredential.username})\x1b[0m`);
+        }
+        
+        terminal.writeln('\x1b[35m🔒 Security monitoring active\x1b[0m\r\n');
+        
+        // Set up terminal input handling
+        terminal.onData((data) => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+              type: 'input',
+              data: data
+            }));
+          }
+        });
+
+        // Handle terminal resize
+        terminal.onResize((size) => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+              type: 'resize',
+              cols: size.cols,
+              rows: size.rows
+            }));
+          }
+        });
+
+        terminal.focus();
+      }
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const message = JSON.parse(event.data);
+        
+        switch (message.type) {
+          case 'output':
+            if (terminal) {
+              terminal.write(message.data);
+            }
+            break;
+          case 'connected':
+            if (terminal) {
+              terminal.writeln('\r\n\x1b[32m✓ SSH session established\x1b[0m');
+              terminal.writeln('\x1b[36mYou are now connected to the remote server\x1b[0m\r\n');
+              terminal.focus();
+            }
+            break;
+          case 'status':
+            if (terminal) {
+              terminal.writeln(`\x1b[33m${message.message}\x1b[0m`);
+            }
+            break;
+          case 'security_warning':
+            setSecurityWarning(message.message);
+            if (message.blocked_command) {
+              setBlockedCommand(message.blocked_command);
+              // The blocked command message is already sent as output from backend
+            } else {
+              // Warning but not blocked
+              if (terminal) {
+                terminal.write(`\r\n\x1b[33m⚠️  ${message.message}\x1b[0m\r\n`);
+              }
+            }
+            break;
+          case 'realtime_warning':
+            setRealtimeWarning(message.message);
+            // Show real-time warning
+            if (terminal) {
+              terminal.write(`\r\n\x1b[33m⚠️  ${message.message}\x1b[0m\r\n`);
+            }
+            break;
+          case 'error':
+            setError(message.message);
+            setStatus('error');
+            if (terminal) {
+              terminal.writeln(`\r\n\x1b[31m✗ Connection Error: ${message.message}\x1b[0m`);
+            }
+            break;
+          default:
+            console.log('Unknown message type:', message.type);
+        }
+      } catch (err) {
+        console.error('Error parsing WebSocket message:', err);
+        // If it's not JSON, treat it as raw terminal output
+        if (terminal) {
+          terminal.write(event.data);
+        }
+      }
+    };
+
+    ws.onclose = (event) => {
+      setStatus('disconnected');
+      setIsConnecting(false);
+      
+      if (event.code !== 1000) {
+        const errorMsg = event.reason || `Connection closed with code ${event.code}`;
+        setError(errorMsg);
+        if (terminal) {
+          terminal.writeln(`\r\n\x1b[31m✗ Connection closed: ${errorMsg}\x1b[0m`);
+        }
+      } else {
+        if (terminal) {
+          terminal.writeln('\r\n\x1b[33mSession ended by user\x1b[0m');
+        }
+      }
+    };
+
+    ws.onerror = (error) => {
+      setStatus('error');
+      setIsConnecting(false);
+      setError('WebSocket connection failed.');
+      
+      if (terminal) {
+        terminal.writeln('\r\n\x1b[31m✗ WebSocket connection failed\x1b[0m');
+      }
+    };
+
+    setWebsocket(ws);
   };
 
   const fetchResourceDetails = async () => {
@@ -116,8 +275,6 @@ export default function TerminalPage() {
         throw new Error('No authentication token found');
       }
 
-      console.log('Fetching resource details for ID:', resourceId);
-      
       const response = await fetch(`/api/resources/${resourceId}`, {
         headers: {
           'Authorization': `Bearer ${token}`
@@ -126,10 +283,7 @@ export default function TerminalPage() {
 
       if (response.ok) {
         const resourceData = await response.json();
-        console.log('Resource details:', resourceData);
         setResource(resourceData);
-        
-        // Fetch credentials after resource details are loaded
         await fetchCredentials();
       } else {
         const errorData = await response.json();
@@ -150,8 +304,6 @@ export default function TerminalPage() {
         throw new Error('No authentication token found');
       }
 
-      console.log('Fetching credentials for resource:', resourceId);
-      
       const response = await fetch(`/api/resources/${resourceId}/credentials`, {
         headers: {
           'Authorization': `Bearer ${token}`
@@ -160,21 +312,12 @@ export default function TerminalPage() {
 
       if (response.ok) {
         const credentialsData = await response.json();
-        console.log('Available credentials:', credentialsData);
         setAvailableCredentials(credentialsData);
         
         if (credentialsData.length > 0) {
-          // Auto-select the first credential
           setSelectedCredentialId(credentialsData[0].id.toString());
-          console.log('Auto-selected credential:', credentialsData[0].id);
-        } else {
-          console.warn('No credentials available for this resource');
-          setError('No credentials configured for this resource. Please contact an administrator.');
-          setStatus('error');
         }
       } else if (response.status === 403) {
-        // User doesn't have permission to view credentials, but can still try to connect
-        console.log('User does not have permission to view credentials, proceeding with default connection');
         setAvailableCredentials([]);
       } else {
         const errorData = await response.json();
@@ -182,200 +325,16 @@ export default function TerminalPage() {
       }
     } catch (err: any) {
       console.error('Error fetching credentials:', err);
-      // Don't set error state here - we can still try to connect without credential selection
       setAvailableCredentials([]);
     } finally {
       setIsLoadingCredentials(false);
     }
   };
 
-  const connectWebSocket = () => {
-    if (isConnecting || websocket) return;
-    
-    setIsConnecting(true);
-    setStatus('connecting');
-    setError('');
-
-    const token = localStorage.getItem('token');
-    if (!token) {
-      setError('Authentication required');
-      setStatus('error');
-      setIsConnecting(false);
-      router.push('/login');
-      return;
-    }
-
-    // Use the backend URL directly for WebSocket
-    const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
-    let wsUrl = `${backendUrl.replace('http', 'ws')}/ws/resources/${resourceId}/ssh?token=${token}`;
-    
-    // Add credential ID if selected
-    if (selectedCredentialId) {
-      wsUrl += `&credential_id=${selectedCredentialId}`;
-      console.log('Connecting with credential ID:', selectedCredentialId);
-    } else {
-      console.log('Connecting without specific credential (using default)');
-    }
-    
-    console.log('Connecting to WebSocket:', wsUrl);
-    
-    const ws = new WebSocket(wsUrl);
-
-    ws.onopen = () => {
-      console.log('WebSocket connection opened');
-      setStatus('connected');
-      setError('');
-      setIsConnecting(false);
-      
-      if (terminal) {
-        terminal.writeln('\r\n\x1b[32m✓ Connected to OpenPAM gateway\x1b[0m');
-        terminal.writeln('\x1b[33mNegotiating SSH connection...\x1b[0m');
-        
-        // Display credential info if available
-        const selectedCredential = availableCredentials.find(
-          cred => cred.id.toString() === selectedCredentialId
-        );
-        if (selectedCredential) {
-          terminal.writeln(`\x1b[36mUsing credential: ${selectedCredential.name} (${selectedCredential.username})\x1b[0m`);
-        }
-      }
-    };
-
-    ws.onmessage = (event) => {
-      try {
-        const message = JSON.parse(event.data);
-        console.log('WebSocket message received:', message);
-        
-        switch (message.type) {
-          case 'output':
-            if (terminal) {
-              // Write data directly to terminal - this enables real-time display
-              terminal.write(message.data);
-            }
-            break;
-          case 'connected':
-            console.log('SSH connection established');
-            if (terminal) {
-              terminal.writeln('\r\n\x1b[32m✓ SSH session established\x1b[0m');
-              terminal.writeln('\x1b[36mYou are now connected to the remote server\x1b[0m\r\n');
-              // Focus the terminal for immediate input
-              terminal.focus();
-            }
-            break;
-          case 'status':
-            if (terminal) {
-              terminal.writeln(`\x1b[33m${message.message}\x1b[0m`);
-            }
-            break;
-          case 'error':
-            console.error('SSH connection error:', message.message);
-            setError(message.message);
-            setStatus('error');
-            if (terminal) {
-              terminal.writeln(`\r\n\x1b[31m✗ Connection Error: ${message.message}\x1b[0m`);
-              terminal.writeln('\x1b[33mCheck if:\x1b[0m');
-              terminal.writeln('1. The target server is running and accessible');
-              terminal.writeln('2. SSH credentials are properly configured');
-              terminal.writeln('3. Your access request is still valid');
-              terminal.writeln('4. The selected credential has correct permissions');
-            }
-            break;
-          default:
-            console.log('Unknown message type:', message.type);
-        }
-      } catch (err) {
-        console.error('Error parsing WebSocket message:', err);
-        // Try to display raw data if JSON parsing fails
-        if (terminal) {
-          terminal.write(event.data);
-        }
-      }
-    };
-
-    ws.onclose = (event) => {
-      console.log('WebSocket connection closed:', event.code, event.reason);
-      setStatus('disconnected');
-      setIsConnecting(false);
-      
-      if (event.code !== 1000) {
-        const errorMsg = event.reason || `Connection closed with code ${event.code}`;
-        setError(errorMsg);
-        if (terminal) {
-          terminal.writeln(`\r\n\x1b[31m✗ Connection closed: ${errorMsg}\x1b[0m`);
-        }
-      } else {
-        if (terminal) {
-          terminal.writeln('\r\n\x1b[33mSession ended by user\x1b[0m');
-        }
-      }
-    };
-
-    ws.onerror = (error) => {
-      console.error('WebSocket error:', error);
-      setStatus('error');
-      setIsConnecting(false);
-      setError('WebSocket connection failed. Make sure the backend server is running on port 8000.');
-      
-      if (terminal) {
-        terminal.writeln('\r\n\x1b[31m✗ WebSocket connection failed\x1b[0m');
-        terminal.writeln('\x1b[33mEnsure backend server is running:\x1b[0m');
-        terminal.writeln('1. Check if backend is running on port 8000');
-        terminal.writeln('2. Verify CORS settings');
-        terminal.writeln('3. Check network connectivity');
-      }
-    };
-
-    setWebsocket(ws);
-
-    // Setup terminal input handling
-    if (terminal) {
-      terminal.onData((data) => {
-        if (ws.readyState === WebSocket.OPEN) {
-          // Send input immediately to enable real-time typing
-          ws.send(JSON.stringify({
-            type: 'input',
-            data: data
-          }));
-        }
-      });
-
-      terminal.onResize((size) => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({
-            type: 'resize',
-            cols: size.cols,
-            rows: size.rows
-          }));
-        }
-      });
-
-      // Handle paste events
-      terminal.onBinary((data) => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({
-            type: 'input',
-            data: data
-          }));
-        }
-      });
-
-      // Focus the terminal immediately
-      setTimeout(() => {
-        if (terminal) {
-          terminal.focus();
-        }
-      }, 100);
-    }
-  };
-
-  const handleCredentialChange = (credentialId: string) => {
-    setSelectedCredentialId(credentialId);
-    console.log('Credential changed to:', credentialId);
-    
-    // If we're already connected, show a message that credential change requires reconnection
-    if (status === 'connected' && terminal) {
-      terminal.writeln('\r\n\x1b[33mCredential change detected. Reconnect to use new credential.\x1b[0m');
-    }
+  const clearWarnings = () => {
+    setSecurityWarning(null);
+    setRealtimeWarning(null);
+    setBlockedCommand(null);
   };
 
   const handleReconnect = () => {
@@ -386,10 +345,6 @@ export default function TerminalPage() {
     setError('');
     setStatus('connecting');
     
-    // Reinitialize terminal
-    initializeTerminal();
-    
-    // Small delay before reconnecting
     setTimeout(() => {
       connectWebSocket();
     }, 500);
@@ -424,10 +379,6 @@ export default function TerminalPage() {
       case 'error': return 'Error';
       default: return 'Unknown';
     }
-  };
-
-  const getSelectedCredential = () => {
-    return availableCredentials.find(cred => cred.id.toString() === selectedCredentialId);
   };
 
   // Handle window resize
@@ -475,7 +426,7 @@ export default function TerminalPage() {
               <select
                 id="credential-select"
                 value={selectedCredentialId}
-                onChange={(e) => handleCredentialChange(e.target.value)}
+                onChange={(e) => setSelectedCredentialId(e.target.value)}
                 disabled={status === 'connected' || isConnecting}
                 className="bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm text-white disabled:opacity-50"
               >
@@ -485,12 +436,6 @@ export default function TerminalPage() {
                   </option>
                 ))}
               </select>
-            </div>
-          )}
-
-          {isLoadingCredentials && (
-            <div className="text-sm text-gray-300">
-              Loading credentials...
             </div>
           )}
 
@@ -518,17 +463,22 @@ export default function TerminalPage() {
         </div>
       </div>
 
-      {/* Error Display */}
-      {error && (
-        <div className="bg-red-900 text-red-100 p-3">
+      {/* Security Warnings */}
+      {securityWarning && (
+        <div className={`p-3 ${blockedCommand ? 'bg-red-900' : 'bg-yellow-900'} text-white`}>
           <div className="flex justify-between items-center">
             <div className="flex-1">
-              <span className="font-semibold">Connection Error: </span>
-              <span>{error}</span>
+              <span className="font-semibold">Security Alert: </span>
+              <span>{securityWarning}</span>
+              {blockedCommand && (
+                <div className="text-sm mt-1">
+                  Blocked command: <code className="bg-red-800 px-1 rounded">{blockedCommand}</code>
+                </div>
+              )}
             </div>
             <button
-              onClick={() => setError('')}
-              className="text-red-300 hover:text-white ml-4"
+              onClick={clearWarnings}
+              className="text-white hover:text-gray-300 ml-4"
             >
               ×
             </button>
@@ -536,45 +486,30 @@ export default function TerminalPage() {
         </div>
       )}
 
-      {/* Connection Help */}
+      {/* Real-time Warning */}
+      {realtimeWarning && !securityWarning && (
+        <div className="bg-yellow-900 text-yellow-100 p-3">
+          <div className="flex justify-between items-center">
+            <div className="flex-1">
+              <span className="font-semibold">Warning: </span>
+              <span>{realtimeWarning}</span>
+            </div>
+            <button
+              onClick={clearWarnings}
+              className="text-yellow-300 hover:text-yellow-100 ml-4"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Connection Status */}
       {status === 'connecting' && (
         <div className="bg-blue-900 text-blue-100 p-3">
           <div className="flex items-center space-x-2">
             <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
-            <span>
-              Establishing secure SSH connection via OpenPAM gateway...
-              {selectedCredentialId && (
-                <span className="ml-2">
-                  Using credential: {getSelectedCredential()?.name}
-                </span>
-              )}
-            </span>
-          </div>
-        </div>
-      )}
-
-      {/* Credential Info Banner */}
-      {selectedCredentialId && status === 'connected' && (
-        <div className="bg-green-900 text-green-100 p-2 text-sm">
-          <div className="flex items-center justify-center space-x-2">
-            <span>Connected using credential:</span>
-            <span className="font-semibold">
-              {getSelectedCredential()?.name} ({getSelectedCredential()?.username})
-            </span>
-            <span className="text-green-300">•</span>
-            <span className="text-green-300">
-              Type: {getSelectedCredential()?.type}
-            </span>
-          </div>
-        </div>
-      )}
-
-      {/* No Credentials Warning */}
-      {availableCredentials.length === 0 && !isLoadingCredentials && (
-        <div className="bg-yellow-900 text-yellow-100 p-2 text-sm">
-          <div className="flex items-center justify-center space-x-2">
-            <span>⚠️ No credentials available or insufficient permissions to view credentials.</span>
-            <span>Using default system credential.</span>
+            <span>Establishing secure SSH connection...</span>
           </div>
         </div>
       )}
@@ -583,21 +518,16 @@ export default function TerminalPage() {
       <div 
         ref={terminalRef} 
         className="flex-1 p-2"
-        onClick={() => terminal?.focus()} // Focus terminal on click
+        onClick={() => terminal?.focus()}
       />
       
-      {/* Help Footer */}
+      {/* Security Footer */}
       <div className="bg-gray-800 text-gray-300 p-2 text-xs">
         <div className="flex justify-between items-center">
-          <span>OpenPAM Web SSH Terminal - All sessions are logged and monitored</span>
+          <span>🔒 OpenPAM Web SSH Terminal - Security monitoring active</span>
           <div className="flex space-x-4">
-            <span>Secure Gateway Connection</span>
-            {selectedCredentialId && (
-              <span>Credential: {getSelectedCredential()?.name}</span>
-            )}
-            {isConnecting && (
-              <span className="text-yellow-400">Establishing connection...</span>
-            )}
+            <span>All sessions are recorded</span>
+            <span>Suspicious commands are blocked</span>
           </div>
         </div>
       </div>

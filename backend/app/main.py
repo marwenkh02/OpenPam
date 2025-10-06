@@ -270,10 +270,13 @@ class SSHService:
 ssh_service = SSHService()
 
 # SSH Session Manager Implementation with Session Recording
+# SSH Session Manager Implementation with Session Recording and Real-time Detection
 class SSHSessionManager:
     def __init__(self):
         self.sessions: Dict[int, Dict] = {}
-        self.session_sequences: Dict[str, int] = {}  # Track sequence numbers per session
+        self.session_sequences: Dict[str, int] = {}
+        self.pending_commands: Dict[str, str] = {}  # Track pending commands per session
+        self.current_input: Dict[str, str] = {}  # Track current input line per session
 
     async def handle_ssh_websocket(self, websocket: WebSocket, resource_id: int, token: str, credential_id: str = None):
         """Handle SSH WebSocket connection with session recording"""
@@ -395,7 +398,7 @@ class SSHSessionManager:
                     severity="info"
                 )
 
-                # Start bidirectional data transfer with session recording
+                # Start bidirectional data transfer with session recording and real-time detection
                 await self.handle_bidirectional_communication(
                     websocket, ssh_process, resource_id, user.id, db, current_session_id
                 )
@@ -422,16 +425,15 @@ class SSHSessionManager:
             await self.cleanup_connection(ssh_process, ssh_conn, db)
 
     async def handle_bidirectional_communication(self, websocket: WebSocket, ssh_process, resource_id: int, user_id: int, db: Session, session_id: str = None):
-        """Handle data transfer between WebSocket and SSH process with session recording"""
+        """Handle data transfer between WebSocket and SSH process with enhanced session recording and real-time detection"""
         
         async def read_ssh_output():
             """Read output from SSH process and send to WebSocket"""
             try:
                 while True:
-                    # Read data from SSH stdout
                     data = await ssh_process.stdout.read(1024)
                     if data:
-                        # Record output if session recording is enabled
+                        # Record output
                         if session_id:
                             try:
                                 sequence = self.session_sequences[session_id]
@@ -455,33 +457,142 @@ class SSHSessionManager:
                 logger.error(f"SSH read error: {str(e)}")
 
         async def read_websocket_input():
-            """Read input from WebSocket and send to SSH process"""
+            """Read input from WebSocket with real-time command detection"""
             try:
                 while True:
                     data = await websocket.receive_text()
                     message = json.loads(data)
                     
                     if message["type"] == "input":
-                        # Record command if session recording is enabled
-                        if session_id and message["data"].strip():
-                            try:
-                                sequence = self.session_sequences[session_id]
-                                await session_recording_service.record_session_event(
-                                    db=db,
-                                    session_id=session_id,
-                                    event_type="command",
-                                    data=message["data"],
-                                    sequence=sequence
-                                )
-                                self.session_sequences[session_id] += 1
-                            except Exception as e:
-                                logger.error(f"Failed to record command: {str(e)}")
+                        input_data = message["data"]
                         
-                        # Send input directly to SSH process stdin
-                        ssh_process.stdin.write(message["data"])
-                        await ssh_process.stdin.drain()
+                        # Initialize current input for session
+                        if session_id not in self.current_input:
+                            self.current_input[session_id] = ""
+                        
+                        # Handle special keys
+                        if input_data == '\r':  # Enter key - execute command
+                            current_command = self.current_input[session_id]
+                            
+                            if current_command.strip():
+                                # Check command safety before execution
+                                safety_check = await session_recording_service.check_command_safety(session_id, current_command)
+                                
+                                if not safety_check["safe"] and safety_check.get("block_execution", False):
+                                    # Block command execution
+                                    await websocket.send_text(json.dumps({
+                                        "type": "security_warning",
+                                        "message": safety_check["warning"],
+                                        "blocked_command": current_command
+                                    }))
+                                    
+                                    # Record security warning
+                                    if session_id:
+                                        try:
+                                            sequence = self.session_sequences[session_id]
+                                            await session_recording_service.record_session_event(
+                                                db=db,
+                                                session_id=session_id,
+                                                event_type="warning_triggered",
+                                                data=json.dumps({
+                                                    "command": current_command,
+                                                    "warning": safety_check["warning"],
+                                                    "action": "blocked"
+                                                }),
+                                                sequence=sequence
+                                            )
+                                            self.session_sequences[session_id] += 1
+                                        except Exception as e:
+                                            logger.error(f"Failed to record warning: {str(e)}")
+                                    
+                                    # Send blocked command to terminal for display (but don't execute)
+                                    ssh_process.stdin.write('\r\n')
+                                    await ssh_process.stdin.drain()
+                                    
+                                    # Show blocked message in terminal
+                                    blocked_msg = f"\r\n\x1b[31mCommand blocked: {current_command}\x1b[0m\r\n\x1b[33m{safety_check['warning']}\x1b[0m\r\n"
+                                    await websocket.send_text(json.dumps({
+                                        "type": "output",
+                                        "data": blocked_msg
+                                    }))
+                                    
+                                else:
+                                    # Command is safe to execute (or warning only)
+                                    if safety_check["warning"]:
+                                        # Send warning but allow execution
+                                        await websocket.send_text(json.dumps({
+                                            "type": "security_warning",
+                                            "message": safety_check["warning"],
+                                            "blocked_command": None
+                                        }))
+                                    
+                                    # Record command execution
+                                    if session_id:
+                                        try:
+                                            sequence = self.session_sequences[session_id]
+                                            await session_recording_service.record_session_event(
+                                                db=db,
+                                                session_id=session_id,
+                                                event_type="command_executed",
+                                                data=current_command,
+                                                sequence=sequence
+                                            )
+                                            self.session_sequences[session_id] += 1
+                                        except Exception as e:
+                                            logger.error(f"Failed to record command: {str(e)}")
+                                    
+                                    # Send command to SSH process
+                                    ssh_process.stdin.write(current_command + '\r\n')
+                                    await ssh_process.stdin.drain()
+                            
+                            # Reset current input
+                            self.current_input[session_id] = ""
+                            
+                        elif input_data == '\x7f':  # Backspace
+                            # Handle backspace in current input
+                            if self.current_input[session_id]:
+                                self.current_input[session_id] = self.current_input[session_id][:-1]
+                            # Send backspace to terminal
+                            ssh_process.stdin.write(input_data)
+                            await ssh_process.stdin.drain()
+                            
+                        elif input_data == '\x03':  # Ctrl+C
+                            # Clear current input on Ctrl+C
+                            self.current_input[session_id] = ""
+                            ssh_process.stdin.write(input_data)
+                            await ssh_process.stdin.drain()
+                            
+                        elif input_data == '\x04':  # Ctrl+D
+                            # Handle Ctrl+D
+                            self.current_input[session_id] = ""
+                            ssh_process.stdin.write(input_data)
+                            await ssh_process.stdin.drain()
+                            
+                        elif input_data == '\t':  # Tab
+                            # Handle tab completion
+                            ssh_process.stdin.write(input_data)
+                            await ssh_process.stdin.drain()
+                            
+                        else:
+                            # Regular character input - update current input
+                            self.current_input[session_id] += input_data
+                            
+                            # Real-time command detection for warning (but don't block typing)
+                            current_input = self.current_input[session_id]
+                            real_time_check = await session_recording_service._check_real_time_suspicious(current_input)
+                            
+                            if real_time_check:
+                                await websocket.send_text(json.dumps({
+                                    "type": "realtime_warning",
+                                    "message": "Warning: This command matches suspicious patterns. It may be blocked if you try to execute it.",
+                                    "current_input": current_input
+                                }))
+                            
+                            # Send input to SSH process for normal terminal handling
+                            ssh_process.stdin.write(input_data)
+                            await ssh_process.stdin.drain()
+                    
                     elif message["type"] == "resize":
-                        # Handle terminal resize
                         cols = message.get("cols", 80)
                         rows = message.get("rows", 24)
                         try:
@@ -496,6 +607,10 @@ class SSHSessionManager:
                 logger.error(f"WebSocket read error: {str(e)}")
                 raise
 
+        # Initialize current input for this session
+        if session_id:
+            self.current_input[session_id] = ""
+
         # Create tasks for reading from SSH and WebSocket
         read_ssh_task = asyncio.create_task(read_ssh_output())
         read_websocket_task = asyncio.create_task(read_websocket_input())
@@ -509,6 +624,12 @@ class SSHSessionManager:
         except Exception as e:
             logger.error(f"Bidirectional communication error: {str(e)}")
         finally:
+            # Clean up session data
+            if session_id in self.current_input:
+                del self.current_input[session_id]
+            if session_id in self.pending_commands:
+                del self.pending_commands[session_id]
+
             # Cancel pending tasks
             for task in pending:
                 task.cancel()
@@ -530,6 +651,7 @@ class SSHSessionManager:
                 resource_id=resource_id,
                 severity="info"
             )
+
 
     async def authenticate_user(self, token: str, db: Session) -> Optional[User]:
         """Authenticate user from JWT token"""

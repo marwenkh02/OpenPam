@@ -39,6 +39,14 @@ interface SessionEvent {
   sequence: number;
 }
 
+interface SuspiciousCommand {
+  id: number;
+  command: string;
+  timestamp: string;
+  severity: string;
+  attempt_count: number;
+}
+
 export default function SessionsPage() {
   const [sessions, setSessions] = useState<RecordedSession[]>([]);
   const [loading, setLoading] = useState(true);
@@ -46,9 +54,11 @@ export default function SessionsPage() {
   const [user, setUser] = useState<User | null>(null);
   const [selectedSession, setSelectedSession] = useState<RecordedSession | null>(null);
   const [sessionEvents, setSessionEvents] = useState<SessionEvent[]>([]);
+  const [suspiciousCommands, setSuspiciousCommands] = useState<SuspiciousCommand[]>([]);
   const [showPlaybackModal, setShowPlaybackModal] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentEventIndex, setCurrentEventIndex] = useState(0);
+  const [playbackSpeed, setPlaybackSpeed] = useState(1);
 
   const router = useRouter();
 
@@ -128,7 +138,8 @@ export default function SessionsPage() {
 
       if (response.ok) {
         const data = await response.json();
-        setSessionEvents(data.events);
+        setSessionEvents(data.events || []);
+        setSuspiciousCommands(data.suspicious_commands || []);
         setShowPlaybackModal(true);
         setCurrentEventIndex(0);
       } else {
@@ -143,6 +154,17 @@ export default function SessionsPage() {
   const startPlayback = () => {
     setIsPlaying(true);
     setCurrentEventIndex(0);
+    
+    const playbackInterval = setInterval(() => {
+      setCurrentEventIndex(prev => {
+        if (prev >= sessionEvents.length - 1) {
+          clearInterval(playbackInterval);
+          setIsPlaying(false);
+          return prev;
+        }
+        return prev + 1;
+      });
+    }, 1000 / playbackSpeed);
   };
 
   const stopPlayback = () => {
@@ -163,10 +185,50 @@ export default function SessionsPage() {
         return `${baseClasses} bg-yellow-100 text-yellow-800`;
       case 'completed':
         return `${baseClasses} bg-green-100 text-green-800`;
+      case 'terminated_security':
+        return `${baseClasses} bg-red-100 text-red-800`;
       case 'failed':
         return `${baseClasses} bg-red-100 text-red-800`;
       default:
         return `${baseClasses} bg-gray-100 text-gray-800`;
+    }
+  };
+
+  const getEventColor = (eventType: string) => {
+    switch (eventType) {
+      case 'command_executed':
+        return 'text-yellow-300';
+      case 'command_input':
+        return 'text-blue-300';
+      case 'output':
+        return 'text-green-400';
+      case 'warning':
+        return 'text-orange-300';
+      case 'security_violation':
+        return 'text-red-400';
+      case 'warning_triggered':
+        return 'text-orange-400';
+      default:
+        return 'text-gray-400';
+    }
+  };
+
+  const getEventIcon = (eventType: string) => {
+    switch (eventType) {
+      case 'command_executed':
+        return '🚀';
+      case 'command_input':
+        return '⌨️';
+      case 'output':
+        return '📤';
+      case 'warning':
+        return '⚠️';
+      case 'security_violation':
+        return '🔴';
+      case 'warning_triggered':
+        return '🚫';
+      default:
+        return '📝';
     }
   };
 
@@ -264,17 +326,19 @@ export default function SessionsPage() {
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <span className={getStatusBadge(session.status)}>
-                        {session.status}
+                        {session.status.replace('_', ' ')}
                       </span>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       {session.suspicious_detected ? (
                         <span className="px-2 py-1 bg-red-100 text-red-800 rounded-full text-xs font-medium">
-                          Yes
+                          {suspiciousCommands.filter(cmd => 
+                            sessions.find(s => s.id === session.id)
+                          ).length} detected
                         </span>
                       ) : (
                         <span className="px-2 py-1 bg-green-100 text-green-800 rounded-full text-xs font-medium">
-                          No
+                          Clean
                         </span>
                       )}
                     </td>
@@ -307,7 +371,7 @@ export default function SessionsPage() {
         </div>
       </main>
 
-      {/* Playback Modal */}
+      {/* Enhanced Playback Modal */}
       {showPlaybackModal && selectedSession && (
         <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full flex items-center justify-center p-4 z-50">
           <div className="relative bg-white rounded-lg shadow-xl max-w-6xl w-full mx-auto">
@@ -339,16 +403,57 @@ export default function SessionsPage() {
                 </div>
               </div>
 
+              {/* Security Summary */}
+              {suspiciousCommands.length > 0 && (
+                <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-md">
+                  <h4 className="font-semibold text-red-800 mb-2">Security Events Detected</h4>
+                  <div className="space-y-2">
+                    {suspiciousCommands.map((cmd, index) => (
+                      <div key={cmd.id} className="flex justify-between items-center text-sm">
+                        <code className="bg-red-100 px-2 py-1 rounded">{cmd.command}</code>
+                        <span className="text-red-700">Attempt {cmd.attempt_count}</span>
+                        <span className="text-red-600">{new Date(cmd.timestamp).toLocaleTimeString()}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               <div className="bg-gray-900 text-green-400 font-mono text-sm p-4 rounded h-96 overflow-y-auto mb-4">
                 {sessionEvents.slice(0, currentEventIndex + 1).map((event, index) => (
-                  <div key={event.id} className="mb-1">
-                    {event.event_type === 'command' ? (
-                      <div className="text-yellow-300">
-                        <span className="text-gray-500">$ </span>{event.data}
-                      </div>
-                    ) : (
-                      <div className="whitespace-pre-wrap">{event.data}</div>
-                    )}
+                  <div key={event.id} className="mb-1 flex items-start">
+                    <span className="mr-2 text-xs opacity-70 mt-1">
+                      {getEventIcon(event.event_type)}
+                    </span>
+                    <span className={`mr-2 text-xs opacity-70 mt-1 ${getEventColor(event.event_type)}`}>
+                      {new Date(event.timestamp).toLocaleTimeString()}
+                    </span>
+                    <div className={`flex-1 ${getEventColor(event.event_type)}`}>
+                      {event.event_type === 'command_executed' && (
+                        <div>
+                          <span className="text-gray-500">$ </span>
+                          <span className="text-yellow-300">{event.data}</span>
+                        </div>
+                      )}
+                      {event.event_type === 'command_input' && (
+                        <div className="text-blue-300 opacity-70">
+                          [Input: {event.data}]
+                        </div>
+                      )}
+                      {event.event_type === 'output' && (
+                        <div className="whitespace-pre-wrap">{event.data}</div>
+                      )}
+                      {event.event_type === 'warning_triggered' && (
+                        <div className="text-orange-300">
+                          ⚠️ {JSON.parse(event.data).warning}
+                        </div>
+                      )}
+                      {event.event_type === 'security_violation' && (
+                        <div className="text-red-400 font-semibold">
+                          🔴 SECURITY VIOLATION: {JSON.parse(event.data).reason}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 ))}
               </div>
@@ -369,6 +474,16 @@ export default function SessionsPage() {
                   >
                     Stop
                   </button>
+                  <select
+                    value={playbackSpeed}
+                    onChange={(e) => setPlaybackSpeed(Number(e.target.value))}
+                    className="border border-gray-300 rounded px-2 py-2"
+                  >
+                    <option value={0.5}>0.5x</option>
+                    <option value={1}>1x</option>
+                    <option value={2}>2x</option>
+                    <option value={5}>5x</option>
+                  </select>
                 </div>
                 <div className="text-sm text-gray-600">
                   Event {currentEventIndex + 1} of {sessionEvents.length}
@@ -377,27 +492,6 @@ export default function SessionsPage() {
             </div>
           </div>
         </div>
-      )}
-
-      {/* Auto-playback effect */}
-      {isPlaying && (
-        <script
-          dangerouslySetInnerHTML={{
-            __html: `
-              let currentIndex = ${currentEventIndex};
-              const totalEvents = ${sessionEvents.length};
-              const interval = setInterval(() => {
-                currentIndex++;
-                if (currentIndex >= totalEvents) {
-                  clearInterval(interval);
-                  setIsPlaying(false);
-                } else {
-                  setCurrentEventIndex(currentIndex);
-                }
-              }, 100);
-            `
-          }}
-        />
       )}
     </div>
   );
