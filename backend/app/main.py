@@ -37,7 +37,7 @@ import json
 import base64
 
 from .database import SessionLocal, engine, get_db
-from .models import User, Base, AccessRequest, Resource, AuditLog, AuditActionType, Credential, ResourceCheck
+from .models import User, Base, AccessRequest, Resource, AuditLog, AuditActionType, Credential, ResourceCheck, RecordedSession, SessionEvent
 from .schemas import (
     UserCreate, UserResponse, Token, LoginRequest, 
     MFAEnableRequest, MFAResponse, PasswordChangeRequest,
@@ -45,7 +45,8 @@ from .schemas import (
     ResourceCreate, ResourceResponse, ResourceUpdate, ResourceListResponse, 
     AuditLogResponse, AuditLogFilter, HealthCheckResponse, BulkHealthCheckResponse, 
     ResourceCheckResponse, HealthCheckRequest, CredentialCreate, CredentialResponse,
-    CredentialUpdate, CredentialType
+    CredentialUpdate, CredentialType, RecordedSessionCreate, RecordedSessionResponse, 
+    RecordedSessionListResponse, SessionPlaybackResponse, SessionEventCreate
 )
 from .auth import (
     get_password_hash, authenticate_user, 
@@ -71,6 +72,62 @@ except ImportError:
             }
     
     health_check_service = MockHealthCheckService()
+
+# Import session recording service
+try:
+    from .session_recording import session_recording_service
+except ImportError:
+    # Fallback mock service if session_recording module doesn't exist yet
+    class MockSessionRecordingService:
+        async def start_session_recording(self, db, user_id, resource_id, access_request_id):
+            return RecordedSession(
+                session_id="mock_session_id",
+                user_id=user_id,
+                resource_id=resource_id,
+                access_request_id=access_request_id,
+                started_at=datetime.utcnow()
+            )
+        
+        async def stop_session_recording(self, db, session_id):
+            session = RecordedSession(
+                session_id=session_id,
+                user_id=1,
+                resource_id=1,
+                started_at=datetime.utcnow() - timedelta(minutes=10),
+                ended_at=datetime.utcnow(),
+                duration=600
+            )
+            return session
+        
+        async def record_session_event(self, db, session_id, event_type, data, sequence):
+            return SessionEvent(
+                session_id=session_id,
+                event_type=event_type,
+                data=data,
+                sequence=sequence,
+                timestamp=datetime.utcnow()
+            )
+        
+        async def get_session_playback_data(self, db, session_id):
+            return {
+                "session": RecordedSession(
+                    session_id=session_id,
+                    user_id=1,
+                    resource_id=1,
+                    started_at=datetime.utcnow() - timedelta(minutes=10),
+                    ended_at=datetime.utcnow(),
+                    duration=600
+                ),
+                "events": []
+            }
+        
+        async def get_user_sessions(self, db, user_id, limit, offset):
+            return []
+        
+        async def get_all_sessions(self, db, limit, offset):
+            return []
+    
+    session_recording_service = MockSessionRecordingService()
 
 # Import background tasks (you'll need to create these)
 try:
@@ -212,16 +269,19 @@ class SSHService:
 
 ssh_service = SSHService()
 
-# SSH Session Manager Implementation
+# SSH Session Manager Implementation with Session Recording
 class SSHSessionManager:
     def __init__(self):
         self.sessions: Dict[int, Dict] = {}
+        self.session_sequences: Dict[str, int] = {}  # Track sequence numbers per session
 
     async def handle_ssh_websocket(self, websocket: WebSocket, resource_id: int, token: str, credential_id: str = None):
-        """Handle SSH WebSocket connection"""
+        """Handle SSH WebSocket connection with session recording"""
         db = SessionLocal()
         ssh_conn = None
         ssh_process = None
+        recorded_session = None
+        current_session_id = None
         
         try:
             # Authenticate user
@@ -239,6 +299,25 @@ class SSHSessionManager:
                 }))
                 await websocket.close(code=1008)
                 return
+
+            # Get active access request for session recording
+            access_request = db.query(AccessRequest).filter(
+                AccessRequest.user_id == user.id,
+                AccessRequest.resource_id == resource_id,
+                AccessRequest.status == 'approved',
+                AccessRequest.expires_at > datetime.utcnow()
+            ).first()
+
+            if access_request:
+                # Start session recording
+                recorded_session = await session_recording_service.start_session_recording(
+                    db=db,
+                    user_id=user.id,
+                    resource_id=resource_id,
+                    access_request_id=access_request.id
+                )
+                current_session_id = recorded_session.session_id
+                self.session_sequences[current_session_id] = 0
 
             # Get decrypted credentials
             ssh_username, ssh_password, ssh_private_key = await self.get_credentials(credential)
@@ -293,7 +372,8 @@ class SSHSessionManager:
                 
                 await websocket.send_text(json.dumps({
                     "type": "connected",
-                    "message": f"Connected to {resource.hostname} as {ssh_username}"
+                    "message": f"Connected to {resource.hostname} as {ssh_username}",
+                    "session_id": current_session_id
                 }))
 
                 # Log session start
@@ -308,14 +388,17 @@ class SSHSessionManager:
                         "hostname": resource.hostname,
                         "username": ssh_username,
                         "credential_id": credential.id,
-                        "session_type": "ssh"
+                        "session_type": "ssh",
+                        "session_id": current_session_id
                     },
                     resource_id=resource_id,
                     severity="info"
                 )
 
-                # Start bidirectional data transfer
-                await self.handle_bidirectional_communication(websocket, ssh_process, resource_id, user.id, db)
+                # Start bidirectional data transfer with session recording
+                await self.handle_bidirectional_communication(
+                    websocket, ssh_process, resource_id, user.id, db, current_session_id
+                )
 
             except Exception as shell_error:
                 logger.error(f"Failed to start shell: {str(shell_error)}")
@@ -328,8 +411,125 @@ class SSHSessionManager:
             logger.error(f"SSH WebSocket error: {str(e)}")
             await self.send_error(websocket, f"Connection error: {str(e)}")
         finally:
+            # Stop session recording if it was started
+            if current_session_id:
+                try:
+                    await session_recording_service.stop_session_recording(db, current_session_id)
+                except Exception as e:
+                    logger.error(f"Failed to stop session recording: {str(e)}")
+            
             # Cleanup
             await self.cleanup_connection(ssh_process, ssh_conn, db)
+
+    async def handle_bidirectional_communication(self, websocket: WebSocket, ssh_process, resource_id: int, user_id: int, db: Session, session_id: str = None):
+        """Handle data transfer between WebSocket and SSH process with session recording"""
+        
+        async def read_ssh_output():
+            """Read output from SSH process and send to WebSocket"""
+            try:
+                while True:
+                    # Read data from SSH stdout
+                    data = await ssh_process.stdout.read(1024)
+                    if data:
+                        # Record output if session recording is enabled
+                        if session_id:
+                            try:
+                                sequence = self.session_sequences[session_id]
+                                await session_recording_service.record_session_event(
+                                    db=db,
+                                    session_id=session_id,
+                                    event_type="output",
+                                    data=data,
+                                    sequence=sequence
+                                )
+                                self.session_sequences[session_id] += 1
+                            except Exception as e:
+                                logger.error(f"Failed to record output: {str(e)}")
+                        
+                        await websocket.send_text(json.dumps({
+                            "type": "output",
+                            "data": data
+                        }))
+                    await asyncio.sleep(0.01)
+            except Exception as e:
+                logger.error(f"SSH read error: {str(e)}")
+
+        async def read_websocket_input():
+            """Read input from WebSocket and send to SSH process"""
+            try:
+                while True:
+                    data = await websocket.receive_text()
+                    message = json.loads(data)
+                    
+                    if message["type"] == "input":
+                        # Record command if session recording is enabled
+                        if session_id and message["data"].strip():
+                            try:
+                                sequence = self.session_sequences[session_id]
+                                await session_recording_service.record_session_event(
+                                    db=db,
+                                    session_id=session_id,
+                                    event_type="command",
+                                    data=message["data"],
+                                    sequence=sequence
+                                )
+                                self.session_sequences[session_id] += 1
+                            except Exception as e:
+                                logger.error(f"Failed to record command: {str(e)}")
+                        
+                        # Send input directly to SSH process stdin
+                        ssh_process.stdin.write(message["data"])
+                        await ssh_process.stdin.drain()
+                    elif message["type"] == "resize":
+                        # Handle terminal resize
+                        cols = message.get("cols", 80)
+                        rows = message.get("rows", 24)
+                        try:
+                            ssh_process.change_terminal_size(cols, rows)
+                        except:
+                            pass
+                        
+            except WebSocketDisconnect:
+                logger.info("WebSocket client disconnected")
+                raise
+            except Exception as e:
+                logger.error(f"WebSocket read error: {str(e)}")
+                raise
+
+        # Create tasks for reading from SSH and WebSocket
+        read_ssh_task = asyncio.create_task(read_ssh_output())
+        read_websocket_task = asyncio.create_task(read_websocket_input())
+
+        try:
+            # Wait for either task to complete/fail
+            done, pending = await asyncio.wait(
+                [read_ssh_task, read_websocket_task],
+                return_when=asyncio.FIRST_COMPLETED
+            )
+        except Exception as e:
+            logger.error(f"Bidirectional communication error: {str(e)}")
+        finally:
+            # Cancel pending tasks
+            for task in pending:
+                task.cancel()
+
+            # Wait for tasks to complete cancellation
+            if pending:
+                await asyncio.wait(pending, timeout=1.0)
+
+            # Log session end
+            create_audit_log(
+                db=db,
+                user_id=user_id,
+                action="SSH session ended",
+                action_type="session_end",
+                details={
+                    "resource_id": resource_id,
+                    "session_id": session_id
+                },
+                resource_id=resource_id,
+                severity="info"
+            )
 
     async def authenticate_user(self, token: str, db: Session) -> Optional[User]:
         """Authenticate user from JWT token"""
@@ -395,86 +595,6 @@ class SSHSessionManager:
             ssh_private_key = decrypt_credential(credential.encrypted_private_key)
 
         return ssh_username, ssh_password, ssh_private_key
-
-    async def handle_bidirectional_communication(self, websocket: WebSocket, ssh_process, resource_id: int, user_id: int, db: Session):
-        """Handle data transfer between WebSocket and SSH process"""
-        
-        async def read_ssh_output():
-            """Read output from SSH process and send to WebSocket"""
-            try:
-                while True:
-                    # Read data from SSH stdout
-                    data = await ssh_process.stdout.read(1024)
-                    if data:
-                        await websocket.send_text(json.dumps({
-                            "type": "output",
-                            "data": data
-                        }))
-                    await asyncio.sleep(0.01)  # Small delay to prevent busy waiting
-            except Exception as e:
-                logger.error(f"SSH read error: {str(e)}")
-                # Don't re-raise, just break the loop
-
-        async def read_websocket_input():
-            """Read input from WebSocket and send to SSH process"""
-            try:
-                while True:
-                    data = await websocket.receive_text()
-                    message = json.loads(data)
-                    
-                    if message["type"] == "input":
-                        # Send input directly to SSH process stdin
-                        ssh_process.stdin.write(message["data"])
-                        await ssh_process.stdin.drain()  # Ensure data is sent
-                    elif message["type"] == "resize":
-                        # Handle terminal resize
-                        cols = message.get("cols", 80)
-                        rows = message.get("rows", 24)
-                        try:
-                            ssh_process.change_terminal_size(cols, rows)
-                        except:
-                            pass  # resize might not be supported
-                        
-            except WebSocketDisconnect:
-                logger.info("WebSocket client disconnected")
-                raise
-            except Exception as e:
-                logger.error(f"WebSocket read error: {str(e)}")
-                raise
-
-        # Create tasks for reading from SSH and WebSocket
-        read_ssh_task = asyncio.create_task(read_ssh_output())
-        read_websocket_task = asyncio.create_task(read_websocket_input())
-
-        try:
-            # Wait for either task to complete/fail
-            done, pending = await asyncio.wait(
-                [read_ssh_task, read_websocket_task],
-                return_when=asyncio.FIRST_COMPLETED
-            )
-        except Exception as e:
-            logger.error(f"Bidirectional communication error: {str(e)}")
-        finally:
-            # Cancel pending tasks
-            for task in pending:
-                task.cancel()
-
-            # Wait for tasks to complete cancellation
-            if pending:
-                await asyncio.wait(pending, timeout=1.0)
-
-            # Log session end
-            create_audit_log(
-                db=db,
-                user_id=user_id,
-                action="SSH session ended",
-                action_type="session_end",
-                details={
-                    "resource_id": resource_id,
-                },
-                resource_id=resource_id,
-                severity="info"
-            )
 
     async def send_error(self, websocket: WebSocket, message: str):
         """Send error message to WebSocket"""
@@ -580,6 +700,210 @@ def create_audit_log(
 @app.get("/")
 async def root():
     return {"message": "OpenPAM API is running"}
+
+# Session Recording Endpoints
+@app.post("/api/sessions/start", response_model=RecordedSessionResponse)
+async def start_session_recording(
+    session_data: RecordedSessionCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Start recording a new session"""
+    try:
+        # Verify user has access to the resource
+        access_request = db.query(AccessRequest).filter(
+            AccessRequest.id == session_data.access_request_id,
+            AccessRequest.user_id == current_user.id,
+            AccessRequest.status == 'approved',
+            AccessRequest.expires_at > datetime.utcnow()
+        ).first()
+        
+        if not access_request:
+            raise HTTPException(
+                status_code=403,
+                detail="No valid access request found for this resource"
+            )
+        
+        recorded_session = await session_recording_service.start_session_recording(
+            db=db,
+            user_id=current_user.id,
+            resource_id=session_data.resource_id,
+            access_request_id=session_data.access_request_id
+        )
+        
+        # Log session start
+        create_audit_log(
+            db=db,
+            user_id=current_user.id,
+            action="Session recording started",
+            action_type="session_start",
+            details={
+                "session_id": recorded_session.session_id,
+                "resource_id": session_data.resource_id,
+                "access_request_id": session_data.access_request_id
+            },
+            resource_id=session_data.resource_id,
+            severity="info"
+        )
+        
+        return recorded_session
+        
+    except Exception as e:
+        logger.error(f"Failed to start session recording: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to start session recording"
+        )
+
+@app.post("/api/sessions/{session_id}/events")
+async def record_session_event(
+    session_id: str,
+    event_data: SessionEventCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Record a session event"""
+    try:
+        event = await session_recording_service.record_session_event(
+            db=db,
+            session_id=session_id,
+            event_type=event_data.event_type,
+            data=event_data.data,
+            sequence=event_data.sequence
+        )
+        
+        return {"message": "Event recorded successfully", "event_id": event.id}
+        
+    except Exception as e:
+        logger.error(f"Failed to record session event: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to record session event"
+        )
+
+@app.post("/api/sessions/{session_id}/stop", response_model=RecordedSessionResponse)
+async def stop_session_recording(
+    session_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Stop recording a session"""
+    try:
+        recorded_session = await session_recording_service.stop_session_recording(
+            db=db,
+            session_id=session_id
+        )
+        
+        # Log session end
+        create_audit_log(
+            db=db,
+            user_id=current_user.id,
+            action="Session recording stopped",
+            action_type="session_end",
+            details={
+                "session_id": session_id,
+                "duration": recorded_session.duration
+            },
+            resource_id=recorded_session.resource_id,
+            severity="info"
+        )
+        
+        return recorded_session
+        
+    except Exception as e:
+        logger.error(f"Failed to stop session recording: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to stop session recording"
+        )
+
+@app.get("/api/sessions/{session_id}/playback", response_model=SessionPlaybackResponse)
+async def get_session_playback(
+    session_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get session data for playback"""
+    try:
+        # Verify user has access to this session
+        session = db.query(RecordedSession).filter(
+            RecordedSession.session_id == session_id
+        ).first()
+        
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        # Users can only see their own sessions unless they're admin
+        if not current_user.is_admin and session.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        playback_data = await session_recording_service.get_session_playback_data(
+            db=db,
+            session_id=session_id
+        )
+        
+        return {
+            "session": playback_data["session"],
+            "events": playback_data["events"]
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get session playback: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to get session playback data"
+        )
+
+@app.get("/api/sessions/my-sessions", response_model=List[RecordedSessionResponse])
+async def get_my_sessions(
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get current user's sessions"""
+    try:
+        sessions = await session_recording_service.get_user_sessions(
+            db=db,
+            user_id=current_user.id,
+            limit=limit,
+            offset=offset
+        )
+        
+        return sessions
+        
+    except Exception as e:
+        logger.error(f"Failed to get user sessions: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to get sessions"
+        )
+
+@app.get("/api/sessions", response_model=List[RecordedSessionResponse])
+async def get_all_sessions(
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user)
+):
+    """Get all sessions (admin only)"""
+    try:
+        sessions = await session_recording_service.get_all_sessions(
+            db=db,
+            limit=limit,
+            offset=offset
+        )
+        
+        return sessions
+        
+    except Exception as e:
+        logger.error(f"Failed to get all sessions: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to get sessions"
+        )
 
 # Updated WebSocket SSH handler with improved connection management
 @app.websocket("/ws/resources/{resource_id}/ssh")

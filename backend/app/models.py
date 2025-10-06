@@ -44,6 +44,11 @@ class CredentialType(enum.Enum):
     API_KEY = "api_key"
     TOKEN = "token"
 
+class SessionRecordingStatus(enum.Enum):
+    RECORDING = "recording"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
 class Role(Base):
     __tablename__ = "roles"
 
@@ -79,12 +84,13 @@ class User(Base):
     role_id = Column(Integer, ForeignKey("roles.id"), nullable=True)
     role = relationship("Role", back_populates="users")
     
-    # Relationships - FIXED: Use backref instead of back_populates for circular dependencies
+    # Relationships
     access_requests = relationship("AccessRequest", back_populates="user", foreign_keys="AccessRequest.user_id")
     approved_requests = relationship("AccessRequest", back_populates="approver", foreign_keys="AccessRequest.approved_by")
     sessions = relationship("UserSession", back_populates="user")
     audit_logs = relationship("AuditLog", back_populates="user", foreign_keys="AuditLog.user_id")
     admin_audit_logs = relationship("AuditLog", back_populates="admin_user", foreign_keys="AuditLog.admin_user_id")
+    recorded_sessions = relationship("RecordedSession", back_populates="user")
 
 class UserSession(Base):
     __tablename__ = "user_sessions"
@@ -160,15 +166,32 @@ class RecordedSession(Base):
     access_request_id = Column(Integer, ForeignKey("access_requests.id"))
     user_id = Column(Integer, ForeignKey("users.id"))
     resource_id = Column(Integer, ForeignKey("resources.id"))
+    session_id = Column(String, unique=True, index=True)  # Unique session identifier
     started_at = Column(DateTime, default=datetime.utcnow)
     ended_at = Column(DateTime, nullable=True)
     recording_path = Column(String, nullable=True)
+    recording_data = Column(Text, nullable=True)  # Store session data directly in DB
+    status = Column(String, default="recording")  # recording, completed, failed
+    duration = Column(Integer, nullable=True)  # Duration in seconds
     suspicious_detected = Column(Boolean, default=False)
 
-    user = relationship("User")
-    resource = relationship("Resource")
+    user = relationship("User", back_populates="recorded_sessions")
+    resource = relationship("Resource", back_populates="recorded_sessions")
     access_request = relationship("AccessRequest", back_populates="recorded_sessions")
     suspicious_commands = relationship("SuspiciousCommand", back_populates="session")
+    session_events = relationship("SessionEvent", back_populates="session")
+
+class SessionEvent(Base):
+    __tablename__ = "session_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(Integer, ForeignKey("recorded_sessions.id"))
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    event_type = Column(String, nullable=False)  # command, output, resize, etc.
+    data = Column(Text, nullable=False)  # The actual command or output
+    sequence = Column(Integer, nullable=False)  # Order of events
+
+    session = relationship("RecordedSession", back_populates="session_events")
 
 class SuspiciousCommand(Base):
     __tablename__ = "suspicious_commands"
@@ -208,7 +231,7 @@ class Credential(Base):
     id = Column(Integer, primary_key=True, index=True)
     resource_id = Column(Integer, ForeignKey("resources.id"), nullable=False)
     name = Column(String, nullable=False)
-    type = Column(String, nullable=False)  # 'password', 'ssh_key', etc.
+    type = Column(String, nullable=False)
     username = Column(String, nullable=True)
     encrypted_password = Column(String, nullable=True)
     encrypted_private_key = Column(String, nullable=True)
@@ -233,4 +256,4 @@ class RotationHistory(Base):
     details = Column(String, nullable=True)
 
     credential = relationship("Credential", back_populates="rotation_history")
-    user = relationship("User")  # Simplified relationship without back_populates
+    user = relationship("User")

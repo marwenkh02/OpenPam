@@ -106,7 +106,7 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
-  const [activeTab, setActiveTab] = useState<'overview' | 'requests' | 'admin' | 'audit' | 'resources'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'requests' | 'admin' | 'audit' | 'resources' | 'sessions'>('overview');
   const [resources, setResources] = useState<Resource[]>([]);
   const [myAccessRequests, setMyAccessRequests] = useState<AccessRequest[]>([]);
   const [allAccessRequests, setAllAccessRequests] = useState<AccessRequest[]>([]);
@@ -1316,72 +1316,85 @@ const handleCreateCredential = async (e: React.FormEvent) => {
         </div>
       </header>
 
-      {/* Navigation Tabs */}
-      <div className="bg-white border-b">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <nav className="flex space-x-8 overflow-x-auto">
-            <button
-              onClick={() => setActiveTab('overview')}
-              className={`py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
-                activeTab === 'overview'
-                  ? 'border-blue-500 text-blue-600'
-                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-              }`}
-            >
-              Overview
-            </button>
-            
-            <button
-              onClick={() => setActiveTab('resources')}
-              className={`py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
-                activeTab === 'resources'
-                  ? 'border-blue-500 text-blue-600'
-                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-              }`}
-            >
-              Resources
-            </button>
-            
-            {!user?.is_admin && (
-              <button
-                onClick={() => setActiveTab('requests')}
-                className={`py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
-                  activeTab === 'requests'
-                    ? 'border-blue-500 text-blue-600'
-                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                }`}
-              >
-                My Access Requests
-              </button>
-            )}
-            
-            {user?.is_admin && (
-              <>
-                <button
-                  onClick={() => setActiveTab('admin')}
-                  className={`py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
-                    activeTab === 'admin'
-                      ? 'border-blue-500 text-blue-600'
-                      : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                  }`}
-                >
-                  Admin Panel
-                </button>
-                <button
-                  onClick={() => setActiveTab('audit')}
-                  className={`py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
-                    activeTab === 'audit'
-                      ? 'border-blue-500 text-blue-600'
-                      : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                  }`}
-                >
-                  Audit History
-                </button>
-              </>
-            )}
-          </nav>
-        </div>
-      </div>
+
+
+{/* Navigation Tabs */}
+<div className="bg-white border-b">
+  <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+    <nav className="flex space-x-8 overflow-x-auto">
+      <button
+        onClick={() => setActiveTab('overview')}
+        className={`py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
+          activeTab === 'overview'
+            ? 'border-blue-500 text-blue-600'
+            : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+        }`}
+      >
+        Overview
+      </button>
+      
+      <button
+        onClick={() => setActiveTab('resources')}
+        className={`py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
+          activeTab === 'resources'
+            ? 'border-blue-500 text-blue-600'
+            : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+        }`}
+      >
+        Resources
+      </button>
+      
+      {!user?.is_admin && (
+        <button
+          onClick={() => setActiveTab('requests')}
+          className={`py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
+            activeTab === 'requests'
+              ? 'border-blue-500 text-blue-600'
+              : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+          }`}
+        >
+          My Access Requests
+        </button>
+      )}
+      
+      {user?.is_admin && (
+        <>
+          <button
+            onClick={() => setActiveTab('admin')}
+            className={`py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
+              activeTab === 'admin'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+            }`}
+          >
+            Admin Panel
+          </button>
+          <button
+            onClick={() => setActiveTab('audit')}
+            className={`py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
+              activeTab === 'audit'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+            }`}
+          >
+            Audit History
+          </button>
+          <button
+            onClick={() => router.push('/sessions')}
+            className={`py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
+              activeTab === 'sessions'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+            }`}
+          >
+            Session Recordings
+          </button>
+        </>
+      )}
+    </nav>
+  </div>
+</div>
+
 
       <main className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-8">
         {error && (

@@ -3,12 +3,16 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime
 from enum import Enum
 
-# Add this CredentialType Enum
 class CredentialType(str, Enum):
     PASSWORD = "password"
     SSH_KEY = "ssh_key"
     API_KEY = "api_key"
     TOKEN = "token"
+
+class SessionRecordingStatus(str, Enum):
+    RECORDING = "recording"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
 class UserCreate(BaseModel):
     username: str = Field(..., min_length=3, max_length=50)
@@ -151,7 +155,6 @@ class ResourceCreate(BaseModel):
 
     @validator('hostname')
     def validate_hostname(cls, v):
-        # Basic hostname/IP validation
         if not v or len(v.strip()) == 0:
             raise ValueError('hostname cannot be empty')
         return v
@@ -264,7 +267,7 @@ class AuditLogFilter(BaseModel):
     limit: int = 100
     offset: int = 0
 
-# Add these credential schemas
+# Credential Schemas
 class CredentialBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     type: CredentialType
@@ -318,9 +321,75 @@ class CredentialResponse(BaseModel):
     class Config:
         from_attributes = True
 
+# Session Recording Schemas
+class SessionEventCreate(BaseModel):
+    event_type: str
+    data: str
+    sequence: int
+
+class SessionEventResponse(BaseModel):
+    id: int
+    session_id: int
+    timestamp: datetime
+    event_type: str
+    data: str
+    sequence: int
+
+    class Config:
+        from_attributes = True
+
+class RecordedSessionCreate(BaseModel):
+    access_request_id: int
+    resource_id: int
+    session_id: str
+
+class RecordedSessionResponse(BaseModel):
+    id: int
+    access_request_id: int
+    user_id: int
+    resource_id: int
+    session_id: str
+    started_at: datetime
+    ended_at: Optional[datetime]
+    recording_path: Optional[str]
+    recording_data: Optional[str]
+    status: str
+    duration: Optional[int]
+    suspicious_detected: bool
+    user: Optional["UserResponse"] = None
+    resource: Optional["ResourceResponse"] = None
+    access_request: Optional["AccessRequestResponse"] = None
+    session_events: List["SessionEventResponse"] = []
+    suspicious_commands: List["SuspiciousCommandResponse"] = []
+
+    class Config:
+        from_attributes = True
+
+class RecordedSessionListResponse(BaseModel):
+    items: List[RecordedSessionResponse]
+    total: int
+    page: int
+    pages: int
+
+class SuspiciousCommandResponse(BaseModel):
+    id: int
+    session_id: int
+    command: str
+    timestamp: datetime
+    severity: str
+
+    class Config:
+        from_attributes = True
+
+class SessionPlaybackResponse(BaseModel):
+    session: RecordedSessionResponse
+    events: List[SessionEventResponse]
+
 # Update forward references
 AccessRequestResponse.update_forward_refs()
 ResourceResponse.update_forward_refs()
 UserResponse.update_forward_refs()
 AuditLogResponse.update_forward_refs()
 ResourceCheckResponse.update_forward_refs()
+RecordedSessionResponse.update_forward_refs()
+SessionPlaybackResponse.update_forward_refs()
