@@ -37,7 +37,7 @@ import json
 import base64
 
 from .database import SessionLocal, engine, get_db
-from .models import User, Base, AccessRequest, Resource, AuditLog, AuditActionType, Credential, ResourceCheck, RecordedSession, SessionEvent
+from .models import User, Base, AccessRequest, Resource, AuditLog, AuditActionType, Credential, ResourceCheck, RecordedSession, SessionEvent, RotationHistory
 from .schemas import (
     UserCreate, UserResponse, Token, LoginRequest, 
     MFAEnableRequest, MFAResponse, PasswordChangeRequest,
@@ -148,7 +148,7 @@ logger = logging.getLogger(__name__)
 class SSHService:
     def __init__(self):
         self.connections: Dict[int, asyncssh.SSHClientConnection] = {}
-        self.timeout = 30
+        self.timeout = 300  # Increased to 5 minutes
 
     async def connect_with_private_key(self, hostname: str, port: int, username: str, private_key: str) -> asyncssh.SSHClientConnection:
         """Connect to SSH using private key authentication with improved error handling"""
@@ -200,7 +200,7 @@ class SSHService:
                     username=username,
                     client_keys=[key],
                     known_hosts=None,
-                    connect_timeout=15,
+                    connect_timeout=30,  # Increased connection timeout
                     # Add comprehensive connection options
                     kex_algs=[
                         'curve25519-sha256', 'curve25519-sha256@libssh.org',
@@ -213,7 +213,10 @@ class SSHService:
                     ],
                     server_host_key_algs=[
                         'ssh-ed25519', 'ssh-rsa', 'rsa-sha2-256', 'rsa-sha2-512'
-                    ]
+                    ],
+                    # Add keep-alive settings
+                    keepalive_interval=30,  # Send keep-alive every 30 seconds
+                    keepalive_count_max=10,  # Allow up to 10 missed keep-alives
                 ),
                 timeout=self.timeout
             )
@@ -246,7 +249,10 @@ class SSHService:
                     username=username,
                     password=password,
                     known_hosts=None,
-                    connect_timeout=15,
+                    connect_timeout=30,  # Increased connection timeout
+                    # Add keep-alive settings
+                    keepalive_interval=30,  # Send keep-alive every 30 seconds
+                    keepalive_count_max=10,  # Allow up to 10 missed keep-alives
                 ),
                 timeout=self.timeout
             )
@@ -269,7 +275,6 @@ class SSHService:
 
 ssh_service = SSHService()
 
-# SSH Session Manager Implementation with Session Recording
 # SSH Session Manager Implementation with Session Recording and Real-time Detection
 class SSHSessionManager:
     def __init__(self):
@@ -425,10 +430,10 @@ class SSHSessionManager:
             await self.cleanup_connection(ssh_process, ssh_conn, db)
 
     async def handle_bidirectional_communication(self, websocket: WebSocket, ssh_process, resource_id: int, user_id: int, db: Session, session_id: str = None):
-        """Handle data transfer between WebSocket and SSH process with enhanced session recording and real-time detection"""
+        """Handle data transfer between WebSocket and SSH process with proper echo handling"""
         
         async def read_ssh_output():
-            """Read output from SSH process and send to WebSocket"""
+            """Read output from SSH process and send to WebSocket - FIXED VERSION"""
             try:
                 while True:
                     data = await ssh_process.stdout.read(1024)
@@ -457,7 +462,7 @@ class SSHSessionManager:
                 logger.error(f"SSH read error: {str(e)}")
 
         async def read_websocket_input():
-            """Read input from WebSocket with real-time command detection"""
+            """Read input from WebSocket - FIXED VERSION with proper command handling"""
             try:
                 while True:
                     data = await websocket.receive_text()
@@ -469,13 +474,13 @@ class SSHSessionManager:
                         # Initialize current input for session
                         if session_id not in self.current_input:
                             self.current_input[session_id] = ""
-                        
+
                         # Handle special keys
-                        if input_data == '\r':  # Enter key - execute command
-                            current_command = self.current_input[session_id]
+                        if input_data == '\r':  # Enter key
+                            current_command = self.current_input[session_id].strip()
                             
-                            if current_command.strip():
-                                # Check command safety before execution
+                            if current_command:
+                                # Check command safety
                                 safety_check = await session_recording_service.check_command_safety(session_id, current_command)
                                 
                                 if not safety_check["safe"] and safety_check.get("block_execution", False):
@@ -505,11 +510,7 @@ class SSHSessionManager:
                                         except Exception as e:
                                             logger.error(f"Failed to record warning: {str(e)}")
                                     
-                                    # Send blocked command to terminal for display (but don't execute)
-                                    ssh_process.stdin.write('\r\n')
-                                    await ssh_process.stdin.drain()
-                                    
-                                    # Show blocked message in terminal
+                                    # Show blocked message
                                     blocked_msg = f"\r\n\x1b[31mCommand blocked: {current_command}\x1b[0m\r\n\x1b[33m{safety_check['warning']}\x1b[0m\r\n"
                                     await websocket.send_text(json.dumps({
                                         "type": "output",
@@ -517,11 +518,10 @@ class SSHSessionManager:
                                     }))
                                     
                                 else:
-                                    # Command is safe to execute (or warning only)
+                                    # Command is safe to execute
                                     if safety_check["warning"]:
-                                        # Send warning but allow execution
                                         await websocket.send_text(json.dumps({
-                                            "type": "security_warning",
+                                            "type": "security_warning", 
                                             "message": safety_check["warning"],
                                             "blocked_command": None
                                         }))
@@ -541,56 +541,57 @@ class SSHSessionManager:
                                         except Exception as e:
                                             logger.error(f"Failed to record command: {str(e)}")
                                     
-                                    # Send command to SSH process
-                                    ssh_process.stdin.write(current_command + '\r\n')
+                                    # Send ONLY the newline/enter character to SSH
+                                    # DO NOT send the command again - the SSH server already has it from the character-by-character input
+                                    ssh_process.stdin.write('\r\n')
                                     await ssh_process.stdin.drain()
+                            
+                            else:
+                                # Empty command, just send newline
+                                ssh_process.stdin.write('\r\n')
+                                await ssh_process.stdin.drain()
                             
                             # Reset current input
                             self.current_input[session_id] = ""
                             
                         elif input_data == '\x7f':  # Backspace
-                            # Handle backspace in current input
+                            # Handle backspace - send to SSH and update local state
                             if self.current_input[session_id]:
                                 self.current_input[session_id] = self.current_input[session_id][:-1]
-                            # Send backspace to terminal
                             ssh_process.stdin.write(input_data)
                             await ssh_process.stdin.drain()
                             
                         elif input_data == '\x03':  # Ctrl+C
-                            # Clear current input on Ctrl+C
                             self.current_input[session_id] = ""
                             ssh_process.stdin.write(input_data)
                             await ssh_process.stdin.drain()
                             
                         elif input_data == '\x04':  # Ctrl+D
-                            # Handle Ctrl+D
                             self.current_input[session_id] = ""
                             ssh_process.stdin.write(input_data)
                             await ssh_process.stdin.drain()
                             
                         elif input_data == '\t':  # Tab
-                            # Handle tab completion
                             ssh_process.stdin.write(input_data)
                             await ssh_process.stdin.drain()
                             
                         else:
-                            # Regular character input - update current input
+                            # Regular character - update current input AND send to SSH immediately
+                            # This allows the SSH server to echo the character back
                             self.current_input[session_id] += input_data
-                            
-                            # Real-time command detection for warning (but don't block typing)
-                            current_input = self.current_input[session_id]
-                            real_time_check = await session_recording_service._check_real_time_suspicious(current_input)
-                            
-                            if real_time_check:
-                                await websocket.send_text(json.dumps({
-                                    "type": "realtime_warning",
-                                    "message": "Warning: This command matches suspicious patterns. It may be blocked if you try to execute it.",
-                                    "current_input": current_input
-                                }))
-                            
-                            # Send input to SSH process for normal terminal handling
                             ssh_process.stdin.write(input_data)
                             await ssh_process.stdin.drain()
+                            
+                            # Real-time warning check
+                            current_input = self.current_input[session_id]
+                            if len(current_input) > 3:
+                                real_time_check = await session_recording_service._check_real_time_suspicious(current_input)
+                                if real_time_check:
+                                    await websocket.send_text(json.dumps({
+                                        "type": "realtime_warning",
+                                        "message": "Warning: This command matches suspicious patterns.",
+                                        "current_input": current_input
+                                    }))
                     
                     elif message["type"] == "resize":
                         cols = message.get("cols", 80)
@@ -617,7 +618,7 @@ class SSHSessionManager:
 
         try:
             # Wait for either task to complete/fail
-            done, pending = await asyncio.wait(
+            await asyncio.wait(
                 [read_ssh_task, read_websocket_task],
                 return_when=asyncio.FIRST_COMPLETED
             )
@@ -631,12 +632,15 @@ class SSHSessionManager:
                 del self.pending_commands[session_id]
 
             # Cancel pending tasks
-            for task in pending:
-                task.cancel()
+            for task in [read_ssh_task, read_websocket_task]:
+                if not task.done():
+                    task.cancel()
 
             # Wait for tasks to complete cancellation
-            if pending:
-                await asyncio.wait(pending, timeout=1.0)
+            try:
+                await asyncio.wait([read_ssh_task, read_websocket_task], timeout=1.0)
+            except:
+                pass
 
             # Log session end
             create_audit_log(
@@ -651,7 +655,6 @@ class SSHSessionManager:
                 resource_id=resource_id,
                 severity="info"
             )
-
 
     async def authenticate_user(self, token: str, db: Session) -> Optional[User]:
         """Authenticate user from JWT token"""
@@ -1125,7 +1128,7 @@ def create_credential(
             encrypted_password=encrypted_password,
             encrypted_private_key=encrypted_private_key,
             vault_path=None,
-            rotation_interval_days=30  # Default rotation interval
+            rotation_interval_days=0  # No automatic rotation by default (unlimited)
         )
         
         db.add(credential)
@@ -1396,6 +1399,59 @@ def rotate_credential(
     )
     
     return {"message": "Credential rotation initiated successfully"}
+
+@app.put("/api/credentials/{credential_id}/rotation-settings")
+def update_credential_rotation_settings(
+    credential_id: int,
+    rotation_interval_days: int = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user),
+    request: Request = None
+):
+    """Update credential rotation settings (admin only)"""
+    credential = db.query(Credential).filter(
+        Credential.id == credential_id,
+        Credential.is_active == True
+    ).first()
+    
+    if not credential:
+        raise HTTPException(
+            status_code=404,
+            detail="Credential not found"
+        )
+    
+    # Update rotation interval (0 means no rotation)
+    if rotation_interval_days is not None:
+        if rotation_interval_days < 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Rotation interval must be 0 (no rotation) or positive"
+            )
+        credential.rotation_interval_days = rotation_interval_days
+        credential.updated_at = datetime.utcnow()
+        db.commit()
+    
+    # Log rotation settings update
+    create_audit_log(
+        db=db,
+        admin_user_id=current_user.id,
+        action="Credential rotation settings updated",
+        action_type="credential_update",
+        details={
+            "credential_id": credential_id,
+            "resource_id": credential.resource_id,
+            "credential_name": credential.name,
+            "rotation_interval_days": credential.rotation_interval_days
+        },
+        request=request,
+        resource_id=credential.resource_id,
+        severity="info"
+    )
+    
+    return {
+        "message": "Credential rotation settings updated successfully",
+        "rotation_interval_days": credential.rotation_interval_days
+    }
 
 # User Management Endpoints
 @app.post("/users/", response_model=UserResponse)
@@ -1959,9 +2015,27 @@ def delete_resource(
             }
         )
     
-    # For force deletion or no dependencies, use soft delete
-    resource.is_active = False
+    # For force deletion or no dependencies, use hard delete
+    logger.info(f"Hard deleting resource {resource.id} ({resource.name})")
+    resource_name = resource.name  # Store for audit log
+    
+    # Delete related records first to avoid foreign key constraints
+    # Delete audit logs referencing this resource
+    db.query(AuditLog).filter(AuditLog.resource_id == resource.id).delete()
+    
+    # Delete resource checks
+    db.query(ResourceCheck).filter(ResourceCheck.resource_id == resource.id).delete()
+    
+    # Delete credentials
+    db.query(Credential).filter(Credential.resource_id == resource.id).delete()
+    
+    # Delete access requests
+    db.query(AccessRequest).filter(AccessRequest.resource_id == resource.id).delete()
+    
+    # Now delete the resource
+    db.delete(resource)
     db.commit()
+    logger.info(f"Resource {resource.id} ({resource_name}) hard deleted successfully")
     
     # Log resource deletion
     severity = "warning" if force else "info"
@@ -2633,10 +2707,17 @@ def delete_resource_credential(
             "username": credential.username
         }
         
-        # Soft delete
-        credential.is_active = False
-        credential.updated_at = datetime.utcnow()
+        # Hard delete
+        logger.info(f"Hard deleting credential {credential.id} ({credential.name})")
+        credential_name = credential.name  # Store for audit log
+        
+        # Delete related records first (rotation history)
+        db.query(RotationHistory).filter(RotationHistory.credential_id == credential.id).delete()
+        
+        # Now delete the credential
+        db.delete(credential)
         db.commit()
+        logger.info(f"Credential {credential.id} ({credential_name}) hard deleted successfully")
         
         # Log deletion
         create_audit_log(

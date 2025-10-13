@@ -160,11 +160,17 @@ class SessionRecordingService:
         return {"warning": False}
 
     async def _check_real_time_suspicious(self, command_input: str) -> bool:
-        """Check if current command input matches suspicious patterns"""
+        """Check if current command input matches suspicious patterns - LESS AGGRESSIVE"""
         command_clean = command_input.strip()
         
+        # Only check substantial commands
+        if len(command_clean) < 4:
+            return False
+        
+        # Check for exact command matches, not partial matches
         for pattern in self.suspicious_regex:
-            if pattern.search(command_clean):
+            # Use full match for real-time detection to be less aggressive
+            if pattern.fullmatch(command_clean):
                 logger.warning(f"Real-time suspicious command detected: {command_clean}")
                 return True
         

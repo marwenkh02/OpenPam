@@ -37,6 +37,8 @@ Frontend:
       - page.tsx
     - signup/
       - page.tsx
+    - sessions/
+      - page.tsx
     - terminal/
       - [resourceId]/
         - page.tsx
@@ -63,6 +65,7 @@ Backend:
   - database.py
   - main.py
   - models.py
+  - session_recording.py
   - schemas.py
   - tasks.py
   - health_check.py

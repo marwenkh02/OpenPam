@@ -79,13 +79,19 @@ export default function TerminalPage() {
       theme: {
         background: '#1a202c',
         foreground: '#e2e8f0',
-        cursor: '#e2e8f0'
+        cursor: '#e2e8f0',
+        cursorAccent: '#1a202c'
       },
       fontSize: 14,
       fontFamily: 'Menlo, Monaco, "Courier New", monospace',
       cols: 80,
       rows: 24,
-      allowProposedApi: true
+      allowProposedApi: true,
+      // Valid xterm.js options
+      disableStdin: false,
+      scrollback: 1000,
+      tabStopWidth: 8,
+      convertEol: true
     });
 
     const fit = new FitAddon();

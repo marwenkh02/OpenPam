@@ -422,10 +422,12 @@ const handleCreateCredential = async (e: React.FormEvent) => {
 
     setSuccess('Credential deleted successfully!');
     
-    // Refresh credentials list
-    if (selectedResourceForCredential) {
-      await fetchCredentials(selectedResourceForCredential.id);
-    }
+    // Wait a moment for the backend to process, then refresh credentials list
+    setTimeout(async () => {
+      if (selectedResourceForCredential) {
+        await fetchCredentials(selectedResourceForCredential.id);
+      }
+    }, 500);
     
     setTimeout(() => setSuccess(''), 3000);
   } catch (err: any) {
@@ -719,7 +721,11 @@ const handleCreateCredential = async (e: React.FormEvent) => {
       setDeleteForce(false);
       setDeleteDependencies(null);
       setSuccess('Resource deleted successfully!');
-      fetchResources();
+      
+      // Wait a moment for the backend to process, then refresh
+      setTimeout(async () => {
+        await fetchResources();
+      }, 500);
       
       setTimeout(() => setSuccess(''), 3000);
     } catch (err: any) {
@@ -1251,7 +1257,7 @@ const handleCreateCredential = async (e: React.FormEvent) => {
       <div className="flex items-center justify-center min-h-screen bg-gray-50">
         <div className="bg-white p-6 rounded-lg shadow-md max-w-md w-full mx-4">
           <h2 className="text-xl font-semibold text-red-600 mb-4">Error</h2>
-          <p className="text-gray-700 mb-6">{error}</p>
+          <p className="text-gray-900 mb-6">{error}</p>
           <button
             onClick={() => router.push('/login')}
             className="w-full bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700"
@@ -1327,7 +1333,7 @@ const handleCreateCredential = async (e: React.FormEvent) => {
         className={`py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
           activeTab === 'overview'
             ? 'border-blue-500 text-blue-600'
-            : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+            : 'border-transparent text-gray-500 hover:text-gray-900 hover:border-gray-300'
         }`}
       >
         Overview
@@ -1338,7 +1344,7 @@ const handleCreateCredential = async (e: React.FormEvent) => {
         className={`py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
           activeTab === 'resources'
             ? 'border-blue-500 text-blue-600'
-            : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+            : 'border-transparent text-gray-500 hover:text-gray-900 hover:border-gray-300'
         }`}
       >
         Resources
@@ -1350,7 +1356,7 @@ const handleCreateCredential = async (e: React.FormEvent) => {
           className={`py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
             activeTab === 'requests'
               ? 'border-blue-500 text-blue-600'
-              : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+              : 'border-transparent text-gray-500 hover:text-gray-900 hover:border-gray-300'
           }`}
         >
           My Access Requests
@@ -1364,7 +1370,7 @@ const handleCreateCredential = async (e: React.FormEvent) => {
             className={`py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
               activeTab === 'admin'
                 ? 'border-blue-500 text-blue-600'
-                : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                : 'border-transparent text-gray-500 hover:text-gray-900 hover:border-gray-300'
             }`}
           >
             Admin Panel
@@ -1374,7 +1380,7 @@ const handleCreateCredential = async (e: React.FormEvent) => {
             className={`py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
               activeTab === 'audit'
                 ? 'border-blue-500 text-blue-600'
-                : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                : 'border-transparent text-gray-500 hover:text-gray-900 hover:border-gray-300'
             }`}
           >
             Audit History
@@ -1384,7 +1390,7 @@ const handleCreateCredential = async (e: React.FormEvent) => {
             className={`py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
               activeTab === 'sessions'
                 ? 'border-blue-500 text-blue-600'
-                : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                : 'border-transparent text-gray-500 hover:text-gray-900 hover:border-gray-300'
             }`}
           >
             Session Recordings
@@ -1527,14 +1533,14 @@ const handleCreateCredential = async (e: React.FormEvent) => {
                       placeholder="Search resources by name or hostname..."
                       value={resourcesSearch}
                       onChange={(e) => setResourcesSearch(e.target.value)}
-                      className="w-full px-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      className="w-full px-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white"
                     />
                   </div>
                   <div className="w-full sm:w-48">
                     <select
                       value={resourcesTypeFilter}
                       onChange={(e) => setResourcesTypeFilter(e.target.value)}
-                      className="w-full px-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      className="w-full px-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white"
                     >
                       <option value="">All Types</option>
                       <option value="ssh">SSH</option>
@@ -1549,7 +1555,7 @@ const handleCreateCredential = async (e: React.FormEvent) => {
                     <select
                       value={resourcesCriticalityFilter}
                       onChange={(e) => setResourcesCriticalityFilter(e.target.value)}
-                      className="w-full px-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      className="w-full px-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white"
                     >
                       <option value="">All Criticalities</option>
                       <option value="low">Low</option>
@@ -2102,21 +2108,21 @@ const handleCreateCredential = async (e: React.FormEvent) => {
                 <h3 className="text-lg font-semibold mb-4">Filters</h3>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">User ID</label>
+                    <label className="block text-sm font-medium text-gray-900 mb-1">User ID</label>
                     <input
                       type="number"
                       value={auditFilters.user_id}
                       onChange={(e) => handleAuditFilterChange('user_id', e.target.value)}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm text-gray-900 bg-white"
                       placeholder="Filter by user ID"
                     />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Action Type</label>
+                    <label className="block text-sm font-medium text-gray-900 mb-1">Action Type</label>
                     <select
                       value={auditFilters.action_type}
                       onChange={(e) => handleAuditFilterChange('action_type', e.target.value)}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm text-gray-900 bg-white"
                     >
                       <option value="">All Actions</option>
                       <option value="login">Login</option>
@@ -2131,11 +2137,11 @@ const handleCreateCredential = async (e: React.FormEvent) => {
                     </select>
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Severity</label>
+                    <label className="block text-sm font-medium text-gray-900 mb-1">Severity</label>
                     <select
                       value={auditFilters.severity}
                       onChange={(e) => handleAuditFilterChange('severity', e.target.value)}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm text-gray-900 bg-white"
                     >
                       <option value="">All Severities</option>
                       <option value="info">Info</option>
@@ -2144,28 +2150,28 @@ const handleCreateCredential = async (e: React.FormEvent) => {
                     </select>
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Start Date</label>
+                    <label className="block text-sm font-medium text-gray-900 mb-1">Start Date</label>
                     <input
                       type="date"
                       value={auditFilters.start_date}
                       onChange={(e) => handleAuditFilterChange('start_date', e.target.value)}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm text-gray-900 bg-white"
                     />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">End Date</label>
+                    <label className="block text-sm font-medium text-gray-900 mb-1">End Date</label>
                     <input
                       type="date"
                       value={auditFilters.end_date}
                       onChange={(e) => handleAuditFilterChange('end_date', e.target.value)}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm text-gray-900 bg-white"
                     />
                   </div>
                 </div>
                 <div className="flex justify-end space-x-2 mt-4">
                   <button
                     onClick={clearAuditFilters}
-                    className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200"
+                    className="px-4 py-2 text-sm font-medium text-gray-900 bg-gray-100 rounded-md hover:bg-gray-200"
                   >
                     Clear Filters
                   </button>
@@ -2271,7 +2277,7 @@ const handleCreateCredential = async (e: React.FormEvent) => {
                               {log.severity}
                             </span>
                           </div>
-                          <p className="text-sm text-gray-700 mb-2">{log.action}</p>
+                          <p className="text-sm text-gray-900 mb-2">{log.action}</p>
                           <div className="grid grid-cols-2 gap-2 text-xs text-gray-500">
                             <div>
                               <span className="font-medium">Time:</span>
@@ -2326,14 +2332,14 @@ const handleCreateCredential = async (e: React.FormEvent) => {
               <form onSubmit={handleCreateRequest}>
                 <div className="space-y-4">
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                    <label className="block text-sm font-medium text-gray-900 mb-1">
                       Resource
                     </label>
                     <select
                       required
                       value={newRequest.resource_id}
                       onChange={(e) => setNewRequest({...newRequest, resource_id: e.target.value})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm text-gray-900 bg-white"
                     >
                       <option value="">Select a resource</option>
                       {resources.map(resource => (
@@ -2344,19 +2350,19 @@ const handleCreateCredential = async (e: React.FormEvent) => {
                     </select>
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                    <label className="block text-sm font-medium text-gray-900 mb-1">
                       Reason for Access
                     </label>
                     <textarea
                       value={newRequest.reason}
                       onChange={(e) => setNewRequest({...newRequest, reason: e.target.value})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm text-gray-900 bg-white"
                       rows={3}
                       placeholder="Explain why you need access..."
                     />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                    <label className="block text-sm font-medium text-gray-900 mb-1">
                       Access Until
                     </label>
                     <input
@@ -2364,7 +2370,7 @@ const handleCreateCredential = async (e: React.FormEvent) => {
                       required
                       value={newRequest.expires_at}
                       onChange={(e) => setNewRequest({...newRequest, expires_at: e.target.value})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm text-gray-900 bg-white"
                       min={new Date().toISOString().slice(0, 16)}
                       max={new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 16)}
                     />
@@ -2377,7 +2383,7 @@ const handleCreateCredential = async (e: React.FormEvent) => {
                   <button
                     type="button"
                     onClick={() => setShowRequestModal(false)}
-                    className="w-full sm:w-auto px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200"
+                    className="w-full sm:w-auto px-4 py-2 text-sm font-medium text-gray-900 bg-gray-100 rounded-md hover:bg-gray-200"
                   >
                     Cancel
                   </button>
@@ -2400,19 +2406,19 @@ const handleCreateCredential = async (e: React.FormEvent) => {
         <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full flex items-center justify-center p-4 z-50">
           <div className="relative bg-white rounded-lg shadow-xl max-w-md w-full mx-auto">
             <div className="p-6">
-              <h3 className="text-lg font-semibold mb-4">
+              <h3 className="text-lg font-semibold mb-4 text-gray-900">
                 Manage Credentials - {selectedResourceForCredential.name}
               </h3>
               
               {/* Existing Credentials */}
               <div className="mb-4">
-                <h4 className="font-medium mb-2">Existing Credentials</h4>
+                <h4 className="font-medium mb-2 text-gray-900">Existing Credentials</h4>
                 {credentials.length > 0 ? (
                   <div className="space-y-2">
                     {credentials.map(cred => (
                       <div key={cred.id} className="flex justify-between items-center p-2 bg-gray-50 rounded">
                         <div>
-                          <span className="font-medium">{cred.name}</span>
+                          <span className="font-medium text-gray-900">{cred.name}</span>
                           <span className="text-sm text-gray-600 ml-2">({cred.type})</span>
                         </div>
                           <button
@@ -2433,7 +2439,7 @@ const handleCreateCredential = async (e: React.FormEvent) => {
               <form onSubmit={handleCreateCredential}>
                 <div className="space-y-4">
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                    <label className="block text-sm font-medium text-gray-900 mb-1">
                       Credential Name *
                     </label>
                     <input
@@ -2441,20 +2447,20 @@ const handleCreateCredential = async (e: React.FormEvent) => {
                       required
                       value={newCredential.name}
                       onChange={(e) => setNewCredential({...newCredential, name: e.target.value})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white"
                       placeholder="e.g., admin-user, root-access"
                     />
                   </div>
                   
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                    <label className="block text-sm font-medium text-gray-900 mb-1">
                       Type *
                     </label>
                     <select
                       required
                       value={newCredential.type}
                       onChange={(e) => setNewCredential({...newCredential, type: e.target.value})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white"
                     >
                       <option value="password">Password</option>
                       <option value="ssh_key">SSH Key</option>
@@ -2462,7 +2468,7 @@ const handleCreateCredential = async (e: React.FormEvent) => {
                   </div>
                   
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                    <label className="block text-sm font-medium text-gray-900 mb-1">
                       Username *
                     </label>
                     <input
@@ -2470,14 +2476,14 @@ const handleCreateCredential = async (e: React.FormEvent) => {
                       required
                       value={newCredential.username}
                       onChange={(e) => setNewCredential({...newCredential, username: e.target.value})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white"
                       placeholder="e.g., root, admin, webuser"
                     />
                   </div>
                   
                   {newCredential.type === 'password' ? (
                     <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                      <label className="block text-sm font-medium text-gray-900 mb-1">
                         Password *
                       </label>
                       <input
@@ -2485,20 +2491,20 @@ const handleCreateCredential = async (e: React.FormEvent) => {
                         required
                         value={newCredential.password}
                         onChange={(e) => setNewCredential({...newCredential, password: e.target.value})}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white"
                         placeholder="SSH password"
                       />
                     </div>
                   ) : (
                     <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                      <label className="block text-sm font-medium text-gray-900 mb-1">
                         Private Key *
                       </label>
                       <textarea
                         required
                         value={newCredential.private_key}
                         onChange={(e) => setNewCredential({...newCredential, private_key: e.target.value})}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white"
                         rows={6}
                         placeholder="Paste SSH private key here..."
                       />
@@ -2510,7 +2516,7 @@ const handleCreateCredential = async (e: React.FormEvent) => {
                   <button
                     type="button"
                     onClick={() => setShowCredentialModal(false)}
-                    className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200"
+                    className="px-4 py-2 text-sm font-medium text-gray-900 bg-gray-100 rounded-md hover:bg-gray-200"
                   >
                     Cancel
                   </button>
@@ -2537,7 +2543,7 @@ const handleCreateCredential = async (e: React.FormEvent) => {
               <form onSubmit={handleCreateResource}>
                 <div className="space-y-4">
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                    <label className="block text-sm font-medium text-gray-900 mb-1">
                       Name *
                     </label>
                     <input
@@ -2547,19 +2553,19 @@ const handleCreateCredential = async (e: React.FormEvent) => {
                       maxLength={100}
                       value={newResource.name}
                       onChange={(e) => setNewResource({...newResource, name: e.target.value})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white"
                       placeholder="Resource name"
                     />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                    <label className="block text-sm font-medium text-gray-900 mb-1">
                       Type *
                     </label>
                     <select
                       required
                       value={newResource.type}
                       onChange={(e) => setNewResource({...newResource, type: e.target.value})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white"
                     >
                       <option value="ssh">SSH</option>
                       <option value="rdp">RDP</option>
@@ -2570,7 +2576,7 @@ const handleCreateCredential = async (e: React.FormEvent) => {
                     </select>
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                    <label className="block text-sm font-medium text-gray-900 mb-1">
                       Hostname *
                     </label>
                     <input
@@ -2578,12 +2584,12 @@ const handleCreateCredential = async (e: React.FormEvent) => {
                       required
                       value={newResource.hostname}
                       onChange={(e) => setNewResource({...newResource, hostname: e.target.value})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white"
                       placeholder="hostname or IP address"
                     />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                    <label className="block text-sm font-medium text-gray-900 mb-1">
                       Port
                     </label>
                     <input
@@ -2592,18 +2598,18 @@ const handleCreateCredential = async (e: React.FormEvent) => {
                       max="65535"
                       value={newResource.port || ''}
                       onChange={(e) => setNewResource({...newResource, port: e.target.value ? parseInt(e.target.value) : undefined})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white"
                       placeholder="Optional port number"
                     />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                    <label className="block text-sm font-medium text-gray-900 mb-1">
                       Criticality
                     </label>
                     <select
                       value={newResource.criticality}
                       onChange={(e) => setNewResource({...newResource, criticality: e.target.value})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white"
                     >
                       <option value="low">Low</option>
                       <option value="medium">Medium</option>
@@ -2611,13 +2617,13 @@ const handleCreateCredential = async (e: React.FormEvent) => {
                     </select>
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                    <label className="block text-sm font-medium text-gray-900 mb-1">
                       Description
                     </label>
                     <textarea
                       value={newResource.description}
                       onChange={(e) => setNewResource({...newResource, description: e.target.value})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white"
                       rows={3}
                       placeholder="Resource description..."
                     />
@@ -2627,7 +2633,7 @@ const handleCreateCredential = async (e: React.FormEvent) => {
                   <button
                     type="button"
                     onClick={() => setShowCreateResourceModal(false)}
-                    className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200"
+                    className="px-4 py-2 text-sm font-medium text-gray-900 bg-gray-100 rounded-md hover:bg-gray-200"
                   >
                     Cancel
                   </button>
@@ -2654,7 +2660,7 @@ const handleCreateCredential = async (e: React.FormEvent) => {
               <form onSubmit={handleUpdateResource}>
                 <div className="space-y-4">
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                    <label className="block text-sm font-medium text-gray-900 mb-1">
                       Name *
                     </label>
                     <input
@@ -2664,18 +2670,18 @@ const handleCreateCredential = async (e: React.FormEvent) => {
                       maxLength={100}
                       value={editResource.name || ''}
                       onChange={(e) => setEditResource({...editResource, name: e.target.value})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white"
                     />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                    <label className="block text-sm font-medium text-gray-900 mb-1">
                       Type *
                     </label>
                     <select
                       required
                       value={editResource.type || ''}
                       onChange={(e) => setEditResource({...editResource, type: e.target.value})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white"
                     >
                       <option value="ssh">SSH</option>
                       <option value="rdp">RDP</option>
@@ -2686,7 +2692,7 @@ const handleCreateCredential = async (e: React.FormEvent) => {
                     </select>
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                    <label className="block text-sm font-medium text-gray-900 mb-1">
                       Hostname *
                     </label>
                     <input
@@ -2694,11 +2700,11 @@ const handleCreateCredential = async (e: React.FormEvent) => {
                       required
                       value={editResource.hostname || ''}
                       onChange={(e) => setEditResource({...editResource, hostname: e.target.value})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white"
                     />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                    <label className="block text-sm font-medium text-gray-900 mb-1">
                       Port
                     </label>
                     <input
@@ -2707,17 +2713,17 @@ const handleCreateCredential = async (e: React.FormEvent) => {
                       max="65535"
                       value={editResource.port || ''}
                       onChange={(e) => setEditResource({...editResource, port: e.target.value ? parseInt(e.target.value) : undefined})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white"
                     />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                    <label className="block text-sm font-medium text-gray-900 mb-1">
                       Criticality
                     </label>
                     <select
                       value={editResource.criticality || ''}
                       onChange={(e) => setEditResource({...editResource, criticality: e.target.value})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white"
                     >
                       <option value="low">Low</option>
                       <option value="medium">Medium</option>
@@ -2725,13 +2731,13 @@ const handleCreateCredential = async (e: React.FormEvent) => {
                     </select>
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                    <label className="block text-sm font-medium text-gray-900 mb-1">
                       Description
                     </label>
                     <textarea
                       value={editResource.description || ''}
                       onChange={(e) => setEditResource({...editResource, description: e.target.value})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white"
                       rows={3}
                     />
                   </div>
@@ -2740,7 +2746,7 @@ const handleCreateCredential = async (e: React.FormEvent) => {
                   <button
                     type="button"
                     onClick={() => setShowEditResourceModal(false)}
-                    className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200"
+                    className="px-4 py-2 text-sm font-medium text-gray-900 bg-gray-100 rounded-md hover:bg-gray-200"
                   >
                     Cancel
                   </button>
@@ -2790,7 +2796,7 @@ const handleCreateCredential = async (e: React.FormEvent) => {
                   </div>
                 </div>
               ) : (
-                <p className="mb-4 text-gray-700">
+                <p className="mb-4 text-gray-900">
                   Are you sure you want to delete the resource <strong>"{selectedResource.name}"</strong>? 
                   This action cannot be undone.
                 </p>
@@ -2799,7 +2805,7 @@ const handleCreateCredential = async (e: React.FormEvent) => {
               <div className="flex justify-end space-x-3">
                 <button
                   onClick={() => setShowDeleteResourceModal(false)}
-                  className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200"
+                  className="px-4 py-2 text-sm font-medium text-gray-900 bg-gray-100 rounded-md hover:bg-gray-200"
                 >
                   Cancel
                 </button>
@@ -2888,7 +2894,7 @@ const handleCreateCredential = async (e: React.FormEvent) => {
                     setSelectedResourceForHistory(null);
                     setResourceCheckHistory([]);
                   }}
-                  className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200"
+                  className="px-4 py-2 text-sm font-medium text-gray-900 bg-gray-100 rounded-md hover:bg-gray-200"
                 >
                   Close
                 </button>
