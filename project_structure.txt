@@ -31,6 +31,13 @@ Frontend:
               - route.ts
       - terminal/
         - route.ts
+      - admin/
+        - users/
+          - route.ts
+          - [userId]/
+            - route.ts
+            - sessions/
+              - route.ts
     - dashboard/
       - page.tsx
     - login/

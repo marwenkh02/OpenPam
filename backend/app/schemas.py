@@ -385,6 +385,20 @@ class SessionPlaybackResponse(BaseModel):
     session: RecordedSessionResponse
     events: List[SessionEventResponse]
 
+# User Session Schemas
+class UserSessionResponse(BaseModel):
+    id: int
+    user_id: int
+    session_token: str
+    created_at: datetime
+    expires_at: datetime
+    ip_address: Optional[str]
+    user_agent: Optional[str]
+    is_revoked: bool
+
+    class Config:
+        from_attributes = True
+
 # Update forward references
 AccessRequestResponse.update_forward_refs()
 ResourceResponse.update_forward_refs()

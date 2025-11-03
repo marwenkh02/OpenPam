@@ -8,6 +8,10 @@ interface User {
   email: string;
   is_active: boolean;
   is_admin: boolean;
+  mfa_enabled?: boolean;
+  last_login?: string;
+  department?: string;
+  job_title?: string;
 }
 
 interface Resource {
@@ -106,7 +110,7 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
-  const [activeTab, setActiveTab] = useState<'overview' | 'requests' | 'admin' | 'audit' | 'resources' | 'sessions'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'requests' | 'admin' | 'audit' | 'resources' | 'sessions' | 'user-management'>('overview');
   const [resources, setResources] = useState<Resource[]>([]);
   const [myAccessRequests, setMyAccessRequests] = useState<AccessRequest[]>([]);
   const [allAccessRequests, setAllAccessRequests] = useState<AccessRequest[]>([]);
@@ -173,8 +177,6 @@ export default function Dashboard() {
   const [selectedResourceForHistory, setSelectedResourceForHistory] = useState<Resource | null>(null);
 
   const router = useRouter();
-
-  
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -277,163 +279,145 @@ export default function Dashboard() {
     }
   };
 
-  
-
   const validatePrivateKey = (privateKey: string): boolean => {
-  if (!privateKey) return false;
-  
-  // Check for proper BEGIN and END markers
-  const hasBeginMarker = privateKey.includes('-----BEGIN');
-  const hasEndMarker = privateKey.includes('-----END');
-  const hasKeyContent = privateKey.length > 100; // Basic length check
-  
-  if (!hasBeginMarker || !hasEndMarker) {
-    console.error('Private key missing BEGIN/END markers');
-    return false;
-  }
-  
-  if (!hasKeyContent) {
-    console.error('Private key too short');
-    return false;
-  }
-  
-  return true;
-};
-
-const handleCreateCredential = async (e: React.FormEvent) => {
-  e.preventDefault();
-  if (!selectedResourceForCredential) return;
-
-  setSubmitting(true);
-  setError('');
-
-  try {
-    // Basic validation
-    if (!newCredential.name.trim()) {
-      throw new Error('Credential name is required');
-    }
-    if (!newCredential.username.trim()) {
-      throw new Error('Username is required');
-    }
-    if (newCredential.type === 'password' && !newCredential.password) {
-      throw new Error('Password is required for password type credentials');
-    }
-    if (newCredential.type === 'ssh_key' && !newCredential.private_key) {
-      throw new Error('Private key is required for SSH key type credentials');
-    }
-    if (newCredential.type === 'ssh_key' && !validatePrivateKey(newCredential.private_key)) {
-      throw new Error('Private key format is invalid. It should start with -----BEGIN and end with -----END');
-    }
-
-    const token = localStorage.getItem('token');
+    if (!privateKey) return false;
     
-    // Prepare the request data - DO NOT base64 encode the private key!
-    const requestData: any = {
-      name: newCredential.name.trim(),
-      type: newCredential.type,
-      username: newCredential.username.trim(),
-      resource_id: selectedResourceForCredential.id
-    };
-
-    // Only include password or private_key based on type
-    if (newCredential.type === 'password') {
-      requestData.password = newCredential.password;
-    } else if (newCredential.type === 'ssh_key') {
-      // Send the private key as raw text, NOT base64 encoded
-      requestData.private_key = newCredential.private_key;
-      
-      // Debug: log the private key format
-      console.log('Private key being sent:', requestData.private_key.substring(0, 100) + '...');
-    }
-
-    console.log('Sending credential data:', requestData);
-
-    const response = await fetch(`/api/resources/${selectedResourceForCredential.id}/credentials`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`
-      },
-      body: JSON.stringify(requestData),
-    });
-
-    console.log('Response status:', response.status);
+    const hasBeginMarker = privateKey.includes('-----BEGIN');
+    const hasEndMarker = privateKey.includes('-----END');
+    const hasKeyContent = privateKey.length > 100;
     
-    if (!response.ok) {
-      const errorData = await response.json();
-      console.error('Error response:', errorData);
-      
-      let errorMessage = 'Failed to create credential';
-      if (errorData.detail) {
-        if (Array.isArray(errorData.detail)) {
-          errorMessage = errorData.detail.map((err: any) => err.msg).join(', ');
-        } else if (typeof errorData.detail === 'string') {
-          errorMessage = errorData.detail;
-        } else if (errorData.detail.msg) {
-          errorMessage = errorData.detail.msg;
-        }
-      } else if (errorData.error) {
-        errorMessage = errorData.error;
+    if (!hasBeginMarker || !hasEndMarker) {
+      console.error('Private key missing BEGIN/END markers');
+      return false;
+    }
+    
+    if (!hasKeyContent) {
+      console.error('Private key too short');
+      return false;
+    }
+    
+    return true;
+  };
+
+  const handleCreateCredential = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedResourceForCredential) return;
+
+    setSubmitting(true);
+    setError('');
+
+    try {
+      if (!newCredential.name.trim()) {
+        throw new Error('Credential name is required');
       }
+      if (!newCredential.username.trim()) {
+        throw new Error('Username is required');
+      }
+      if (newCredential.type === 'password' && !newCredential.password) {
+        throw new Error('Password is required for password type credentials');
+      }
+      if (newCredential.type === 'ssh_key' && !newCredential.private_key) {
+        throw new Error('Private key is required for SSH key type credentials');
+      }
+      if (newCredential.type === 'ssh_key' && !validatePrivateKey(newCredential.private_key)) {
+        throw new Error('Private key format is invalid. It should start with -----BEGIN and end with -----END');
+      }
+
+      const token = localStorage.getItem('token');
       
-      throw new Error(errorMessage);
+      const requestData: any = {
+        name: newCredential.name.trim(),
+        type: newCredential.type,
+        username: newCredential.username.trim(),
+        resource_id: selectedResourceForCredential.id
+      };
+
+      if (newCredential.type === 'password') {
+        requestData.password = newCredential.password;
+      } else if (newCredential.type === 'ssh_key') {
+        requestData.private_key = newCredential.private_key;
+      }
+
+      const response = await fetch(`/api/resources/${selectedResourceForCredential.id}/credentials`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify(requestData),
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        
+        let errorMessage = 'Failed to create credential';
+        if (errorData.detail) {
+          if (Array.isArray(errorData.detail)) {
+            errorMessage = errorData.detail.map((err: any) => err.msg).join(', ');
+          } else if (typeof errorData.detail === 'string') {
+            errorMessage = errorData.detail;
+          } else if (errorData.detail.msg) {
+            errorMessage = errorData.detail.msg;
+          }
+        } else if (errorData.error) {
+          errorMessage = errorData.error;
+        }
+        
+        throw new Error(errorMessage);
+      }
+
+      const result = await response.json();
+
+      setShowCredentialModal(false);
+      setNewCredential({
+        name: '',
+        type: 'password',
+        username: '',
+        password: '',
+        private_key: ''
+      });
+      setSuccess('Credential created successfully!');
+      
+      fetchCredentials(selectedResourceForCredential.id);
+      
+      setTimeout(() => setSuccess(''), 3000);
+    } catch (err: any) {
+      console.error('Error in handleCreateCredential:', err);
+      setError(err.message || 'Failed to create credential');
+    } finally {
+      setSubmitting(false);
     }
-
-    const result = await response.json();
-    console.log('Success response:', result);
-
-    setShowCredentialModal(false);
-    setNewCredential({
-      name: '',
-      type: 'password',
-      username: '',
-      password: '',
-      private_key: ''
-    });
-    setSuccess('Credential created successfully!');
-    
-    // Refresh credentials list
-    fetchCredentials(selectedResourceForCredential.id);
-    
-    setTimeout(() => setSuccess(''), 3000);
-  } catch (err: any) {
-    console.error('Error in handleCreateCredential:', err);
-    setError(err.message || 'Failed to create credential');
-  } finally {
-    setSubmitting(false);
-  }
-};
+  };
 
   const handleDeleteCredential = async (credentialId: number, resourceId: number) => {
-  try {
-    const token = localStorage.getItem('token');
-    const response = await fetch(`/api/resources/${resourceId}/credentials/${credentialId}`, {
-      method: 'DELETE',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-    });
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch(`/api/resources/${resourceId}/credentials/${credentialId}`, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+      });
 
-    if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(errorData.error || 'Failed to delete credential');
-    }
-
-    setSuccess('Credential deleted successfully!');
-    
-    // Wait a moment for the backend to process, then refresh credentials list
-    setTimeout(async () => {
-      if (selectedResourceForCredential) {
-        await fetchCredentials(selectedResourceForCredential.id);
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to delete credential');
       }
-    }, 500);
-    
-    setTimeout(() => setSuccess(''), 3000);
-  } catch (err: any) {
-    setError(err.message || 'Failed to delete credential');
-  }
-};
+
+      setSuccess('Credential deleted successfully!');
+      
+      setTimeout(async () => {
+        if (selectedResourceForCredential) {
+          await fetchCredentials(selectedResourceForCredential.id);
+        }
+      }, 500);
+      
+      setTimeout(() => setSuccess(''), 3000);
+    } catch (err: any) {
+      setError(err.message || 'Failed to delete credential');
+    }
+  };
 
   const openCredentialModal = async (resource: Resource) => {
     setSelectedResourceForCredential(resource);
@@ -465,7 +449,6 @@ const handleCreateCredential = async (e: React.FormEvent) => {
 
       const result: HealthCheckResponse = await response.json();
       
-      // Update the resource in the local state
       setResources(prev => prev.map(resource => 
         resource.id === resourceId 
           ? { 
@@ -489,8 +472,6 @@ const handleCreateCredential = async (e: React.FormEvent) => {
     }
   };
 
-  
-
   const checkAllResourcesHealth = async () => {
     setCheckingResources(new Set(resources.map(r => r.id)));
     
@@ -513,7 +494,6 @@ const handleCreateCredential = async (e: React.FormEvent) => {
 
       const result = await response.json();
       
-      // Update resources with new status
       setResources(prev => prev.map(resource => {
         const checkResult = result.results.find((r: any) => r.resource_id === resource.id);
         if (checkResult) {
@@ -722,7 +702,6 @@ const handleCreateCredential = async (e: React.FormEvent) => {
       setDeleteDependencies(null);
       setSuccess('Resource deleted successfully!');
       
-      // Wait a moment for the backend to process, then refresh
       setTimeout(async () => {
         await fetchResources();
       }, 500);
@@ -926,7 +905,6 @@ const handleCreateCredential = async (e: React.FormEvent) => {
       setShowRequestModal(false);
       setNewRequest({ resource_id: '', reason: '', expires_at: '' });
       
-      // Refresh the appropriate requests list
       if (user?.is_admin) {
         fetchAllAccessRequests();
         fetchPendingAccessRequests();
@@ -1065,13 +1043,11 @@ const handleCreateCredential = async (e: React.FormEvent) => {
     return JSON.stringify(details, null, 2);
   };
 
-  // Safe getter for audit stats
   const getSeverityCount = (severity: string) => {
     if (!auditStats?.severity_stats) return 0;
     return auditStats.severity_stats[severity] || 0;
   };
 
-  // Helper function to check if user has access to a resource
   const hasAccessToResource = (resourceId: number) => {
     if (user?.is_admin) return true;
     
@@ -1084,7 +1060,703 @@ const handleCreateCredential = async (e: React.FormEvent) => {
     return !!request;
   };
 
-  // Responsive table component for mobile
+  // User Management Panel Component - FIXED VERSION
+  const UserManagementPanel = () => {
+    const [users, setUsers] = useState<User[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState('');
+    const [success, setSuccess] = useState('');
+    const [filters, setFilters] = useState({
+      q: '',
+      is_active: '',
+      is_admin: ''
+    });
+    const [selectedUser, setSelectedUser] = useState<User | null>(null);
+    const [showUserDetails, setShowUserDetails] = useState(false);
+    const [showResetPassword, setShowResetPassword] = useState(false);
+    const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+    const [newPassword, setNewPassword] = useState('');
+    const [activeSessions, setActiveSessions] = useState<any[]>([]);
+
+    const fetchUsers = async () => {
+      setLoading(true);
+      setError('');
+      try {
+        const queryParams = new URLSearchParams();
+        if (filters.q) queryParams.append('q', filters.q);
+        if (filters.is_active !== '') queryParams.append('is_active', filters.is_active);
+        if (filters.is_admin !== '') queryParams.append('is_admin', filters.is_admin);
+
+        const token = localStorage.getItem('token');
+        const response = await fetch(`/api/admin/users?${queryParams.toString()}`, {
+          headers: {
+            'Authorization': `Bearer ${token}`
+          }
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          setUsers(data);
+        } else {
+          const errorData = await response.json();
+          throw new Error(errorData.error || 'Failed to fetch users');
+        }
+      } catch (err: any) {
+        setError(err.message);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    const fetchUserSessions = async (userId: number) => {
+      try {
+        const token = localStorage.getItem('token');
+        const response = await fetch(`/api/admin/users/${userId}/sessions?active_only=true`, {
+          headers: {
+            'Authorization': `Bearer ${token}`
+          }
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          setActiveSessions(data);
+        } else {
+          const errorData = await response.json();
+          console.error('Failed to fetch user sessions:', errorData);
+        }
+      } catch (err) {
+        console.error('Failed to fetch user sessions:', err);
+      }
+    };
+
+    useEffect(() => {
+      fetchUsers();
+    }, [filters]);
+
+    const handleUpdateRole = async (userId: number, isAdmin: boolean) => {
+      setError('');
+      try {
+        const token = localStorage.getItem('token');
+        const response = await fetch('/api/admin/users?action=update-role', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify({
+            userId,
+            isAdmin
+          })
+        });
+
+        if (response.ok) {
+          setSuccess(`User role updated to ${isAdmin ? 'admin' : 'user'} successfully`);
+          fetchUsers();
+          setTimeout(() => setSuccess(''), 3000);
+        } else {
+          const errorData = await response.json();
+          throw new Error(errorData.error || 'Failed to update role');
+        }
+      } catch (err: any) {
+        setError(err.message);
+      }
+    };
+
+    const handleUpdateStatus = async (userId: number, isActive: boolean) => {
+      setError('');
+      try {
+        const token = localStorage.getItem('token');
+        const response = await fetch('/api/admin/users?action=update-status', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify({
+            userId,
+            isActive
+          })
+        });
+
+        if (response.ok) {
+          setSuccess(`User account ${isActive ? 'activated' : 'deactivated'} successfully`);
+          fetchUsers();
+          setTimeout(() => setSuccess(''), 3000);
+        } else {
+          const errorData = await response.json();
+          throw new Error(errorData.error || 'Failed to update status');
+        }
+      } catch (err: any) {
+        setError(err.message);
+      }
+    };
+
+    const handleResetPassword = async () => {
+      if (!selectedUser) return;
+      
+      setError('');
+      try {
+        const token = localStorage.getItem('token');
+        const response = await fetch('/api/admin/users?action=reset-password', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify({
+            userId: selectedUser.id,
+            newPassword
+          })
+        });
+
+        if (response.ok) {
+          setSuccess('Password reset successfully');
+          setShowResetPassword(false);
+          setNewPassword('');
+          setTimeout(() => setSuccess(''), 3000);
+        } else {
+          const errorData = await response.json();
+          throw new Error(errorData.error || 'Failed to reset password');
+        }
+      } catch (err: any) {
+        setError(err.message);
+      }
+    };
+
+    const handleDeleteUser = async () => {
+      if (!selectedUser) return;
+
+      setError('');
+      try {
+        const token = localStorage.getItem('token');
+        const response = await fetch('/api/admin/users?action=delete', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify({
+            userId: selectedUser.id
+          })
+        });
+
+        if (response.ok) {
+          setSuccess('User deleted successfully');
+          setShowDeleteConfirm(false);
+          setSelectedUser(null);
+          fetchUsers();
+          setTimeout(() => setSuccess(''), 3000);
+        } else {
+          const errorData = await response.json();
+          throw new Error(errorData.error || 'Failed to delete user');
+        }
+      } catch (err: any) {
+        setError(err.message);
+      }
+    };
+
+    const handleRevokeSession = async (sessionId: number) => {
+      if (!selectedUser) return;
+
+      setError('');
+      try {
+        const token = localStorage.getItem('token');
+        const response = await fetch(`/api/admin/users/${selectedUser.id}/sessions?action=revoke`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify({
+            sessionId
+          })
+        });
+
+        if (response.ok) {
+          setSuccess('Session revoked successfully');
+          fetchUserSessions(selectedUser.id);
+          setTimeout(() => setSuccess(''), 3000);
+        } else {
+          const errorData = await response.json();
+          throw new Error(errorData.error || 'Failed to revoke session');
+        }
+      } catch (err: any) {
+        setError(err.message);
+      }
+    };
+
+    const openUserDetails = async (user: User) => {
+      setSelectedUser(user);
+      setShowUserDetails(true);
+      await fetchUserSessions(user.id);
+    };
+
+    const StatusBadge = ({ user }: { user: User }) => (
+      <span className={`px-2 py-1 rounded-full text-xs font-medium ${
+        user.is_active 
+          ? 'bg-green-100 text-green-800' 
+          : 'bg-red-100 text-red-800'
+      }`}>
+        {user.is_active ? 'Active' : 'Inactive'}
+      </span>
+    );
+
+    const RoleBadge = ({ user }: { user: User }) => (
+      <span className={`px-2 py-1 rounded-full text-xs font-medium ${
+        user.is_admin 
+          ? 'bg-purple-100 text-purple-800' 
+          : 'bg-blue-100 text-blue-800'
+      }`}>
+        {user.is_admin ? 'Admin' : 'User'}
+      </span>
+    );
+
+    return (
+      <div>
+        <div className="mb-6">
+          <h2 className="text-xl sm:text-2xl font-bold text-gray-800 mb-4">User Management</h2>
+          
+          {/* Error/Success Messages */}
+          {error && (
+            <div className="mb-4 p-4 bg-red-50 text-red-700 rounded-md text-sm">
+              {error}
+            </div>
+          )}
+
+          {success && (
+            <div className="mb-4 p-4 bg-green-50 text-green-700 rounded-md text-sm">
+              {success}
+            </div>
+          )}
+
+          {/* Filters */}
+          <div className="bg-white rounded-lg shadow-sm p-4 mb-6">
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-900 mb-1">Search</label>
+                <input
+                  type="text"
+                  value={filters.q}
+                  onChange={(e) => setFilters({...filters, q: e.target.value})}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
+                  placeholder="Search users..."
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-900 mb-1">Status</label>
+                <select
+                  value={filters.is_active}
+                  onChange={(e) => setFilters({...filters, is_active: e.target.value})}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
+                >
+                  <option value="">All Status</option>
+                  <option value="true">Active</option>
+                  <option value="false">Inactive</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-900 mb-1">Role</label>
+                <select
+                  value={filters.is_admin}
+                  onChange={(e) => setFilters({...filters, is_admin: e.target.value})}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
+                >
+                  <option value="">All Roles</option>
+                  <option value="true">Admin</option>
+                  <option value="false">User</option>
+                </select>
+              </div>
+              <div className="flex items-end">
+                <button
+                  onClick={() => setFilters({ q: '', is_active: '', is_admin: '' })}
+                  className="w-full px-4 py-2 text-sm font-medium text-gray-900 bg-gray-100 rounded-md hover:bg-gray-200"
+                >
+                  Clear Filters
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Users Table */}
+          <div className="bg-white rounded-lg shadow-sm overflow-hidden">
+            {loading ? (
+              <div className="text-center py-8">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto"></div>
+                <p className="mt-2 text-gray-600">Loading users...</p>
+              </div>
+            ) : users.length > 0 ? (
+              <>
+                <div className="hidden sm:block">
+                  <table className="min-w-full divide-y divide-gray-200">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">User</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Role</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Last Login</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">MFA</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-gray-200">
+                      {users.map((user) => (
+                        <tr key={user.id} className="hover:bg-gray-50">
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <div>
+                              <div className="text-sm font-medium text-gray-900">{user.username}</div>
+                              <div className="text-sm text-gray-500">{user.email}</div>
+                            </div>
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <StatusBadge user={user} />
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <RoleBadge user={user} />
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                            {user.last_login ? new Date(user.last_login).toLocaleString() : 'Never'}
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <span className={`px-2 py-1 rounded-full text-xs font-medium ${
+                              user.mfa_enabled 
+                                ? 'bg-green-100 text-green-800' 
+                                : 'bg-gray-100 text-gray-800'
+                            }`}>
+                              {user.mfa_enabled ? 'Enabled' : 'Disabled'}
+                            </span>
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                            <div className="flex space-x-2">
+                              <button
+                                onClick={() => openUserDetails(user)}
+                                className="text-blue-600 hover:text-blue-900"
+                                title="View Details"
+                              >
+                                👁️
+                              </button>
+                              <button
+                                onClick={() => handleUpdateRole(user.id, !user.is_admin)}
+                                className="text-purple-600 hover:text-purple-900"
+                                title={user.is_admin ? "Make User" : "Make Admin"}
+                              >
+                                {user.is_admin ? "👤" : "👑"}
+                              </button>
+                              <button
+                                onClick={() => handleUpdateStatus(user.id, !user.is_active)}
+                                className={user.is_active ? "text-red-600 hover:text-red-900" : "text-green-600 hover:text-green-900"}
+                                title={user.is_active ? "Deactivate" : "Activate"}
+                              >
+                                {user.is_active ? "⏸️" : "▶️"}
+                              </button>
+                              <button
+                                onClick={() => {
+                                  setSelectedUser(user);
+                                  setShowResetPassword(true);
+                                }}
+                                className="text-yellow-600 hover:text-yellow-900"
+                                title="Reset Password"
+                              >
+                                🔑
+                              </button>
+                              <button
+                                onClick={() => {
+                                  setSelectedUser(user);
+                                  setShowDeleteConfirm(true);
+                                }}
+                                className="text-red-600 hover:text-red-900"
+                                title="Delete User"
+                              >
+                                🗑️
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Mobile Cards */}
+                <div className="sm:hidden p-4 space-y-4">
+                  {users.map((user) => (
+                    <div key={user.id} className="bg-gray-50 rounded-lg p-4">
+                      <div className="flex justify-between items-start mb-3">
+                        <div>
+                          <h4 className="font-semibold text-gray-900">{user.username}</h4>
+                          <p className="text-sm text-gray-600">{user.email}</p>
+                        </div>
+                        <div className="flex space-x-1">
+                          <StatusBadge user={user} />
+                          <RoleBadge user={user} />
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2 text-sm text-gray-600 mb-3">
+                        <div>
+                          <span className="font-medium">Last Login:</span>
+                          <br />
+                          {user.last_login ? new Date(user.last_login).toLocaleDateString() : 'Never'}
+                        </div>
+                        <div>
+                          <span className="font-medium">MFA:</span>
+                          <br />
+                          {user.mfa_enabled ? 'Enabled' : 'Disabled'}
+                        </div>
+                      </div>
+                      <div className="flex justify-between">
+                        <button
+                          onClick={() => openUserDetails(user)}
+                          className="text-blue-600 hover:text-blue-800 text-sm"
+                        >
+                          Details
+                        </button>
+                        <div className="flex space-x-2">
+                          <button
+                            onClick={() => handleUpdateRole(user.id, !user.is_admin)}
+                            className="text-purple-600 hover:text-purple-800"
+                            title={user.is_admin ? "Make User" : "Make Admin"}
+                          >
+                            {user.is_admin ? "👤" : "👑"}
+                          </button>
+                          <button
+                            onClick={() => handleUpdateStatus(user.id, !user.is_active)}
+                            className={user.is_active ? "text-red-600 hover:text-red-800" : "text-green-600 hover:text-green-800"}
+                          >
+                            {user.is_active ? "⏸️" : "▶️"}
+                          </button>
+                          <button
+                            onClick={() => {
+                              setSelectedUser(user);
+                              setShowResetPassword(true);
+                            }}
+                            className="text-yellow-600 hover:text-yellow-800"
+                          >
+                            🔑
+                          </button>
+                          <button
+                            onClick={() => {
+                              setSelectedUser(user);
+                              setShowDeleteConfirm(true);
+                            }}
+                            className="text-red-600 hover:text-red-800"
+                          >
+                            🗑️
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <div className="text-center py-8">
+                <div className="text-gray-400 mb-4">
+                  <svg className="mx-auto h-12 w-12" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197m13.5-9a2.5 2.5 0 11-5 0 2.5 2.5 0 015 0z" />
+                  </svg>
+                </div>
+                <h3 className="text-lg font-medium text-gray-900 mb-2">No users found</h3>
+                <p className="text-gray-500">No users match your current filters.</p>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* User Details Modal */}
+        {showUserDetails && selectedUser && (
+          <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full flex items-center justify-center p-4 z-50">
+            <div className="relative bg-white rounded-lg shadow-xl max-w-2xl w-full mx-auto">
+              <div className="p-6">
+                <h3 className="text-lg font-semibold mb-4">User Details - {selectedUser.username}</h3>
+                
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                  <div>
+                    <h4 className="font-medium text-gray-900 mb-2">Basic Information</h4>
+                    <dl className="space-y-2">
+                      <div>
+                        <dt className="text-sm font-medium text-gray-500">Username</dt>
+                        <dd className="text-sm text-gray-900">{selectedUser.username}</dd>
+                      </div>
+                      <div>
+                        <dt className="text-sm font-medium text-gray-500">Email</dt>
+                        <dd className="text-sm text-gray-900">{selectedUser.email}</dd>
+                      </div>
+                      <div>
+                        <dt className="text-sm font-medium text-gray-500">Department</dt>
+                        <dd className="text-sm text-gray-900">{selectedUser.department || 'Not set'}</dd>
+                      </div>
+                      <div>
+                        <dt className="text-sm font-medium text-gray-500">Job Title</dt>
+                        <dd className="text-sm text-gray-900">{selectedUser.job_title || 'Not set'}</dd>
+                      </div>
+                    </dl>
+                  </div>
+                  
+                  <div>
+                    <h4 className="font-medium text-gray-900 mb-2">Account Status</h4>
+                    <dl className="space-y-2">
+                      <div>
+                        <dt className="text-sm font-medium text-gray-500">Status</dt>
+                        <dd className="text-sm">
+                          <StatusBadge user={selectedUser} />
+                        </dd>
+                      </div>
+                      <div>
+                        <dt className="text-sm font-medium text-gray-500">Role</dt>
+                        <dd className="text-sm">
+                          <RoleBadge user={selectedUser} />
+                        </dd>
+                      </div>
+                      <div>
+                        <dt className="text-sm font-medium text-gray-500">MFA</dt>
+                        <dd className="text-sm">
+                          <span className={`px-2 py-1 rounded-full text-xs font-medium ${
+                            selectedUser.mfa_enabled 
+                              ? 'bg-green-100 text-green-800' 
+                              : 'bg-gray-100 text-gray-800'
+                          }`}>
+                            {selectedUser.mfa_enabled ? 'Enabled' : 'Disabled'}
+                          </span>
+                        </dd>
+                      </div>
+                      <div>
+                        <dt className="text-sm font-medium text-gray-500">Last Login</dt>
+                        <dd className="text-sm text-gray-900">
+                          {selectedUser.last_login ? new Date(selectedUser.last_login).toLocaleString() : 'Never'}
+                        </dd>
+                      </div>
+                    </dl>
+                  </div>
+                </div>
+
+                {/* Active Sessions */}
+                <div>
+                  <h4 className="font-medium text-gray-900 mb-3">Active Sessions</h4>
+                  {activeSessions.length > 0 ? (
+                    <div className="space-y-2">
+                      {activeSessions.map((session) => (
+                        <div key={session.id} className="flex justify-between items-center p-3 bg-gray-50 rounded">
+                          <div>
+                            <p className="text-sm font-medium text-gray-900">
+                              IP: {session.ip_address}
+                            </p>
+                            <p className="text-xs text-gray-500">
+                              Login: {new Date(session.created_at).toLocaleString()}
+                            </p>
+                          </div>
+                          <button
+                            onClick={() => handleRevokeSession(session.id)}
+                            className="text-red-600 hover:text-red-800 text-sm"
+                          >
+                            Revoke
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-gray-500 text-sm">No active sessions</p>
+                  )}
+                </div>
+
+                <div className="mt-6 flex justify-end">
+                  <button
+                    onClick={() => {
+                      setShowUserDetails(false);
+                      setSelectedUser(null);
+                      setActiveSessions([]);
+                    }}
+                    className="px-4 py-2 text-sm font-medium text-gray-900 bg-gray-100 rounded-md hover:bg-gray-200"
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Reset Password Modal */}
+        {showResetPassword && selectedUser && (
+          <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full flex items-center justify-center p-4 z-50">
+            <div className="relative bg-white rounded-lg shadow-xl max-w-md w-full mx-auto">
+              <div className="p-6">
+                <h3 className="text-lg font-semibold mb-4">Reset Password</h3>
+                <p className="text-gray-600 mb-4">
+                  Reset password for <strong>{selectedUser.username}</strong>
+                </p>
+                
+                <div className="mb-4">
+                  <label className="block text-sm font-medium text-gray-900 mb-1">
+                    New Password *
+                  </label>
+                  <input
+                    type="password"
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white"
+                    placeholder="Enter new password"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    Password must be at least 12 characters with uppercase, lowercase, number, and special character
+                  </p>
+                </div>
+
+                <div className="flex justify-end space-x-3">
+                  <button
+                    onClick={() => {
+                      setShowResetPassword(false);
+                      setNewPassword('');
+                    }}
+                    className="px-4 py-2 text-sm font-medium text-gray-900 bg-gray-100 rounded-md hover:bg-gray-200"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleResetPassword}
+                    disabled={newPassword.length < 12}
+                    className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 disabled:opacity-50"
+                  >
+                    Reset Password
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Delete Confirmation Modal */}
+        {showDeleteConfirm && selectedUser && (
+          <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full flex items-center justify-center p-4 z-50">
+            <div className="relative bg-white rounded-lg shadow-xl max-w-md w-full mx-auto">
+              <div className="p-6">
+                <h3 className="text-lg font-semibold mb-4 text-red-600">Delete User</h3>
+                <p className="text-gray-900 mb-4">
+                  Are you sure you want to delete user <strong>"{selectedUser.username}"</strong>? 
+                  This action cannot be undone and will permanently remove all user data.
+                </p>
+
+                <div className="flex justify-end space-x-3">
+                  <button
+                    onClick={() => setShowDeleteConfirm(false)}
+                    className="px-4 py-2 text-sm font-medium text-gray-900 bg-gray-100 rounded-md hover:bg-gray-200"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleDeleteUser}
+                    className="px-4 py-2 text-sm font-medium text-white bg-red-600 rounded-md hover:bg-red-700"
+                  >
+                    Delete User
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // Mobile Request Card for responsive view
   const MobileRequestCard = ({ request, showActions = false }: { request: AccessRequest, showActions?: boolean }) => (
     <div className="bg-white rounded-lg shadow-sm border p-4 mb-3">
       <div className="space-y-2">
@@ -1322,85 +1994,92 @@ const handleCreateCredential = async (e: React.FormEvent) => {
         </div>
       </header>
 
-
-
-{/* Navigation Tabs */}
-<div className="bg-white border-b">
-  <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-    <nav className="flex space-x-8 overflow-x-auto">
-      <button
-        onClick={() => setActiveTab('overview')}
-        className={`py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
-          activeTab === 'overview'
-            ? 'border-blue-500 text-blue-600'
-            : 'border-transparent text-gray-500 hover:text-gray-900 hover:border-gray-300'
-        }`}
-      >
-        Overview
-      </button>
-      
-      <button
-        onClick={() => setActiveTab('resources')}
-        className={`py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
-          activeTab === 'resources'
-            ? 'border-blue-500 text-blue-600'
-            : 'border-transparent text-gray-500 hover:text-gray-900 hover:border-gray-300'
-        }`}
-      >
-        Resources
-      </button>
-      
-      {!user?.is_admin && (
-        <button
-          onClick={() => setActiveTab('requests')}
-          className={`py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
-            activeTab === 'requests'
-              ? 'border-blue-500 text-blue-600'
-              : 'border-transparent text-gray-500 hover:text-gray-900 hover:border-gray-300'
-          }`}
-        >
-          My Access Requests
-        </button>
-      )}
-      
-      {user?.is_admin && (
-        <>
-          <button
-            onClick={() => setActiveTab('admin')}
-            className={`py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
-              activeTab === 'admin'
-                ? 'border-blue-500 text-blue-600'
-                : 'border-transparent text-gray-500 hover:text-gray-900 hover:border-gray-300'
-            }`}
-          >
-            Admin Panel
-          </button>
-          <button
-            onClick={() => setActiveTab('audit')}
-            className={`py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
-              activeTab === 'audit'
-                ? 'border-blue-500 text-blue-600'
-                : 'border-transparent text-gray-500 hover:text-gray-900 hover:border-gray-300'
-            }`}
-          >
-            Audit History
-          </button>
-          <button
-            onClick={() => router.push('/sessions')}
-            className={`py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
-              activeTab === 'sessions'
-                ? 'border-blue-500 text-blue-600'
-                : 'border-transparent text-gray-500 hover:text-gray-900 hover:border-gray-300'
-            }`}
-          >
-            Session Recordings
-          </button>
-        </>
-      )}
-    </nav>
-  </div>
-</div>
-
+      {/* Navigation Tabs */}
+      <div className="bg-white border-b">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <nav className="flex space-x-8 overflow-x-auto">
+            <button
+              onClick={() => setActiveTab('overview')}
+              className={`py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
+                activeTab === 'overview'
+                  ? 'border-blue-500 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-900 hover:border-gray-300'
+              }`}
+            >
+              Overview
+            </button>
+            
+            <button
+              onClick={() => setActiveTab('resources')}
+              className={`py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
+                activeTab === 'resources'
+                  ? 'border-blue-500 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-900 hover:border-gray-300'
+              }`}
+            >
+              Resources
+            </button>
+            
+            {!user?.is_admin && (
+              <button
+                onClick={() => setActiveTab('requests')}
+                className={`py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
+                  activeTab === 'requests'
+                    ? 'border-blue-500 text-blue-600'
+                    : 'border-transparent text-gray-500 hover:text-gray-900 hover:border-gray-300'
+                }`}
+              >
+                My Access Requests
+              </button>
+            )}
+            
+            {user?.is_admin && (
+              <>
+                <button
+                  onClick={() => setActiveTab('admin')}
+                  className={`py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
+                    activeTab === 'admin'
+                      ? 'border-blue-500 text-blue-600'
+                      : 'border-transparent text-gray-500 hover:text-gray-900 hover:border-gray-300'
+                  }`}
+                >
+                  Admin Panel
+                </button>
+                <button
+                  onClick={() => setActiveTab('audit')}
+                  className={`py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
+                    activeTab === 'audit'
+                      ? 'border-blue-500 text-blue-600'
+                      : 'border-transparent text-gray-500 hover:text-gray-900 hover:border-gray-300'
+                  }`}
+                >
+                  Audit History
+                </button>
+                <button
+                  onClick={() => setActiveTab('user-management')}
+                  className={`py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
+                    activeTab === 'user-management'
+                      ? 'border-blue-500 text-blue-600'
+                      : 'border-transparent text-gray-500 hover:text-gray-900 hover:border-gray-300'
+                  }`}
+                >
+                  User Management
+                </button>
+                <button
+                  onClick={() => router.push('/sessions')}
+                  className={`py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
+                    activeTab === 'sessions'
+                      ? 'border-blue-500 text-blue-600'
+                      : 'border-transparent text-gray-500 hover:text-gray-900 hover:border-gray-300'
+                  }`}
+                >
+                  Session Recordings
+                </button>
+              </>
+            )}
+          </nav>
+        </div>
+      </div>
 
       <main className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-8">
         {error && (
@@ -2320,6 +2999,11 @@ const handleCreateCredential = async (e: React.FormEvent) => {
               </div>
             </div>
           </div>
+        )}
+
+        {/* User Management Tab - Only for admin users */}
+        {activeTab === 'user-management' && user?.is_admin && (
+          <UserManagementPanel />
         )}
       </main>
 

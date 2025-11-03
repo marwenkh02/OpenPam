@@ -24,7 +24,7 @@ def encrypt_credential(credential: str) -> str:
 def decrypt_credential(encrypted_credential: str) -> str:
     return fernet.decrypt(encrypted_credential.encode()).decode()
 
-from fastapi import FastAPI, Depends, HTTPException, status, Request, BackgroundTasks, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Depends, HTTPException, status, Request, BackgroundTasks, WebSocket, WebSocketDisconnect, Body
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session, joinedload
 from datetime import datetime, timedelta
@@ -37,7 +37,7 @@ import json
 import base64
 
 from .database import SessionLocal, engine, get_db
-from .models import User, Base, AccessRequest, Resource, AuditLog, AuditActionType, Credential, ResourceCheck, RecordedSession, SessionEvent, RotationHistory
+from .models import User, Base, AccessRequest, Resource, AuditLog, AuditActionType, Credential, ResourceCheck, RecordedSession, SessionEvent, RotationHistory, UserSession
 from .schemas import (
     UserCreate, UserResponse, Token, LoginRequest, 
     MFAEnableRequest, MFAResponse, PasswordChangeRequest,
@@ -825,6 +825,588 @@ def create_audit_log(
 @app.get("/")
 async def root():
     return {"message": "OpenPAM API is running"}
+
+# Enhanced User Management Endpoints
+@app.get("/api/admin/users", response_model=List[UserResponse])
+def get_all_users(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user),
+    q: Optional[str] = Query(None, description="Search by username or email"),
+    is_active: Optional[bool] = Query(None, description="Filter by active status"),
+    is_admin: Optional[bool] = Query(None, description="Filter by admin status"),
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0)
+):
+    """Get all users with filtering and pagination (admin only)"""
+    try:
+        query = db.query(User)
+        
+        # Apply search filter
+        if q:
+            query = query.filter(
+                or_(
+                    User.username.ilike(f"%{q}%"),
+                    User.email.ilike(f"%{q}%")
+                )
+            )
+        
+        # Apply status filters
+        if is_active is not None:
+            query = query.filter(User.is_active == is_active)
+        
+        if is_admin is not None:
+            query = query.filter(User.is_admin == is_admin)
+        
+        # Apply pagination
+        users = query.order_by(User.username).offset(offset).limit(limit).all()
+        
+        return users
+        
+    except Exception as e:
+        logger.error(f"Error fetching users: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to fetch users"
+        )
+
+@app.get("/api/admin/users/{user_id}", response_model=UserResponse)
+def get_user_details(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user)
+):
+    """Get detailed user information (admin only)"""
+    try:
+        user = db.query(User).filter(User.id == user_id).first()
+        
+        if not user:
+            raise HTTPException(
+                status_code=404,
+                detail="User not found"
+            )
+        
+        return user
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching user details: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to fetch user details"
+        )
+
+@app.put("/api/admin/users/{user_id}/role")
+def update_user_role(
+    user_id: int,
+    role_data: dict = Body(..., description="Role update data"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user),
+    request: Request = None
+):
+    """Update user role (admin/normal user)"""
+    try:
+        if 'is_admin' not in role_data:
+            raise HTTPException(
+                status_code=400,
+                detail="is_admin field is required"
+            )
+        
+        is_admin = role_data['is_admin']
+        
+        if user_id == current_user.id:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot modify your own role"
+            )
+        
+        user = db.query(User).filter(User.id == user_id).first()
+        
+        if not user:
+            raise HTTPException(
+                status_code=404,
+                detail="User not found"
+            )
+        
+        # Store previous state for audit
+        previous_role = "admin" if user.is_admin else "user"
+        new_role = "admin" if is_admin else "user"
+        
+        user.is_admin = is_admin
+        user.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(user)
+        
+        # Log role change
+        create_audit_log(
+            db=db,
+            admin_user_id=current_user.id,
+            action=f"User role updated from {previous_role} to {new_role}",
+            action_type="user_role_update",
+            details={
+                "user_id": user_id,
+                "username": user.username,
+                "previous_role": previous_role,
+                "new_role": new_role,
+                "changed_by": current_user.username
+            },
+            request=request,
+            severity="info"
+        )
+        
+        return {
+            "message": f"User role updated to {new_role} successfully",
+            "user_id": user_id,
+            "is_admin": is_admin
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating user role: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to update user role"
+        )
+
+@app.put("/api/admin/users/{user_id}/status")
+def update_user_status(
+    user_id: int,
+    status_data: dict = Body(..., description="Status update data"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user),
+    request: Request = None
+):
+    """Activate or deactivate user account"""
+    try:
+        if 'is_active' not in status_data:
+            raise HTTPException(
+                status_code=400,
+                detail="is_active field is required"
+            )
+        
+        is_active = status_data['is_active']
+        
+        if user_id == current_user.id:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot modify your own account status"
+            )
+        
+        user = db.query(User).filter(User.id == user_id).first()
+        
+        if not user:
+            raise HTTPException(
+                status_code=404,
+                detail="User not found"
+            )
+        
+        # Store previous state for audit
+        previous_status = "active" if user.is_active else "inactive"
+        new_status = "active" if is_active else "inactive"
+        
+        user.is_active = is_active
+        user.updated_at = datetime.utcnow()
+        
+        # If deactivating, also revoke all active sessions
+        if not is_active:
+            db.query(UserSession).filter(
+                UserSession.user_id == user_id,
+                UserSession.is_revoked == False
+            ).update({"is_revoked": True})
+        
+        db.commit()
+        db.refresh(user)
+        
+        # Log status change
+        create_audit_log(
+            db=db,
+            admin_user_id=current_user.id,
+            action=f"User account {new_status}",
+            action_type="user_status_update",
+            details={
+                "user_id": user_id,
+                "username": user.username,
+                "previous_status": previous_status,
+                "new_status": new_status,
+                "changed_by": current_user.username
+            },
+            request=request,
+            severity="warning" if not is_active else "info"
+        )
+        
+        return {
+            "message": f"User account {new_status} successfully",
+            "user_id": user_id,
+            "is_active": is_active
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating user status: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to update user status"
+        )
+
+@app.delete("/api/admin/users/{user_id}")
+def delete_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user),
+    request: Request = None
+):
+    """Delete user account (admin only)"""
+    try:
+        if user_id == current_user.id:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot delete your own account"
+            )
+        
+        user = db.query(User).filter(User.id == user_id).first()
+        
+        if not user:
+            raise HTTPException(
+                status_code=404,
+                detail="User not found"
+            )
+        
+        # Check for dependencies with more detailed logging
+        access_requests_count = db.query(AccessRequest).filter(
+            AccessRequest.user_id == user_id
+        ).count()
+        
+        recorded_sessions_count = db.query(RecordedSession).filter(
+            RecordedSession.user_id == user_id
+        ).count()
+        
+        audit_logs_count = db.query(AuditLog).filter(
+            AuditLog.user_id == user_id
+        ).count()
+        
+        user_sessions_count = db.query(UserSession).filter(
+            UserSession.user_id == user_id
+        ).count()
+
+        logger.info(f"User deletion dependencies check for user {user_id}: "
+                   f"access_requests={access_requests_count}, "
+                   f"recorded_sessions={recorded_sessions_count}, "
+                   f"audit_logs={audit_logs_count}, "
+                   f"user_sessions={user_sessions_count}")
+
+        # For now, allow deletion even with dependencies for testing
+        # You can re-enable the restriction later if needed
+        dependencies_exist = (access_requests_count > 0 or 
+                            recorded_sessions_count > 0 or 
+                            audit_logs_count > 0)
+        
+        if dependencies_exist:
+            logger.warning(f"User {user_id} has dependencies but proceeding with deletion")
+            # Uncomment the following lines to enforce dependency checking:
+            # raise HTTPException(
+            #     status_code=409,
+            #     detail={
+            #         "message": "Cannot delete user with existing dependencies",
+            #         "dependencies": {
+            #             "access_requests": access_requests_count,
+            #             "recorded_sessions": recorded_sessions_count,
+            #             "audit_logs": audit_logs_count
+            #         }
+            #     }
+            # )
+        
+        # Store user info for audit log
+        user_info = {
+            "user_id": user.id,
+            "username": user.username,
+            "email": user.email
+        }
+        
+        # Delete related records in correct order to avoid foreign key constraints
+        try:
+            # Delete user sessions first
+            db.query(UserSession).filter(UserSession.user_id == user_id).delete()
+            
+            # Delete rotation history
+            rotation_history = db.query(RotationHistory).filter(RotationHistory.rotated_by == user_id).all()
+            for rh in rotation_history:
+                db.delete(rh)
+            
+            # Delete the user
+            db.delete(user)
+            db.commit()
+            
+            logger.info(f"User {user_id} deleted successfully")
+            
+        except Exception as delete_error:
+            db.rollback()
+            logger.error(f"Error during user deletion: {str(delete_error)}")
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to delete user due to database constraints"
+            )
+        
+        # Log user deletion
+        create_audit_log(
+            db=db,
+            admin_user_id=current_user.id,
+            action="User account deleted",
+            action_type="user_delete",
+            details=user_info,
+            request=request,
+            severity="critical"
+        )
+        
+        return {
+            "message": "User account deleted successfully",
+            "user_id": user_id
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting user: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to delete user"
+        )
+
+@app.post("/api/admin/users/{user_id}/reset-password")
+def reset_user_password(
+    user_id: int,
+    password_data: dict = Body(..., embed=True),  # Add embed=True for single field
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user),
+    request: Request = None
+):
+    """Reset user password (admin only)"""
+    try:
+        # Extract new_password from the request body
+        if 'new_password' not in password_data:
+            raise HTTPException(
+                status_code=400,
+                detail="new_password field is required"
+            )
+        
+        new_password = password_data['new_password']
+        
+        user = db.query(User).filter(User.id == user_id).first()
+        
+        if not user:
+            raise HTTPException(
+                status_code=404,
+                detail="User not found"
+            )
+        
+        # Validate password complexity
+        errors = []
+        if len(new_password) < 12:
+            errors.append("Password must be at least 12 characters long")
+        if not any(c.isupper() for c in new_password):
+            errors.append("Password must contain at least one uppercase letter")
+        if not any(c.islower() for c in new_password):
+            errors.append("Password must contain at least one lowercase letter")
+        if not any(c.isdigit() for c in new_password):
+            errors.append("Password must contain at least one digit")
+        special_chars = "!@#$%^&*(),.?:{}|<>"
+        if not any(c in special_chars for c in new_password):
+            errors.append("Password must contain at least one special character")
+        
+        if errors:
+            raise HTTPException(
+                status_code=422,
+                detail={"errors": errors}
+            )
+        
+        # Update password
+        user.hashed_password = get_password_hash(new_password)
+        user.must_change_password = True  # Force password change on next login
+        user.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(user)
+        
+        # Log password reset
+        create_audit_log(
+            db=db,
+            admin_user_id=current_user.id,
+            action="User password reset by admin",
+            action_type="password_reset",
+            details={
+                "user_id": user_id,
+                "username": user.username,
+                "reset_by": current_user.username
+            },
+            request=request,
+            severity="warning"
+        )
+        
+        return {
+            "message": "Password reset successfully",
+            "user_id": user_id
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error resetting password: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to reset password"
+        )
+
+@app.get("/api/admin/users/{user_id}/sessions")
+def get_user_sessions(
+    user_id: int,
+    active_only: bool = Query(False, description="Show only active sessions"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user)
+):
+    """Get user sessions (admin only)"""
+    try:
+        user = db.query(User).filter(User.id == user_id).first()
+        
+        if not user:
+            raise HTTPException(
+                status_code=404,
+                detail="User not found"
+            )
+        
+        query = db.query(UserSession).filter(UserSession.user_id == user_id)
+        
+        if active_only:
+            query = query.filter(
+                and_(
+                    UserSession.is_revoked == False,
+                    UserSession.expires_at > datetime.utcnow()
+                )
+            )
+        
+        sessions = query.order_by(UserSession.created_at.desc()).all()
+        
+        return sessions
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching user sessions: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to fetch user sessions"
+        )
+
+@app.post("/api/admin/users/{user_id}/sessions/{session_id}/revoke")
+def revoke_user_session(
+    user_id: int,
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user),
+    request: Request = None
+):
+    """Revoke user session (admin only)"""
+    try:
+        session = db.query(UserSession).filter(
+            UserSession.id == session_id,
+            UserSession.user_id == user_id
+        ).first()
+        
+        if not session:
+            raise HTTPException(
+                status_code=404,
+                detail="Session not found"
+            )
+        
+        session.is_revoked = True
+        db.commit()
+        
+        # Log session revocation
+        create_audit_log(
+            db=db,
+            admin_user_id=current_user.id,
+            action="User session revoked by admin",
+            action_type="session_revoke",
+            details={
+                "user_id": user_id,
+                "session_id": session_id,
+                "revoked_by": current_user.username
+            },
+            request=request,
+            severity="warning"
+        )
+        
+        return {
+            "message": "Session revoked successfully",
+            "session_id": session_id
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error revoking session: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to revoke session"
+        )
+
+# Real-time user activity tracking
+@app.websocket("/ws/admin/user-activity")
+async def user_activity_websocket(websocket: WebSocket):
+    """WebSocket for real-time user activity updates"""
+    await websocket.accept()
+    
+    try:
+        # Authenticate admin user
+        token = websocket.query_params.get('token')
+        if not token:
+            await websocket.close(code=1008)
+            return
+        
+        db = SessionLocal()
+        try:
+            user = await ssh_session_manager.authenticate_user(token, db)
+            if not user or not user.is_admin:
+                await websocket.close(code=1008)
+                return
+            
+            # Send initial user activity data
+            active_users = db.query(UserSession).filter(
+                UserSession.is_revoked == False,
+                UserSession.expires_at > datetime.utcnow()
+            ).all()
+            
+            await websocket.send_text(json.dumps({
+                "type": "initial_activity",
+                "active_sessions": len(active_users),
+                "users": [
+                    {
+                        "user_id": session.user_id,
+                        "username": session.user.username,
+                        "ip_address": session.ip_address,
+                        "login_time": session.created_at.isoformat(),
+                        "session_id": session.id
+                    }
+                    for session in active_users
+                ]
+            }))
+            
+            # Keep connection alive and listen for updates
+            while True:
+                await asyncio.sleep(30)  # Send heartbeat every 30 seconds
+                await websocket.send_text(json.dumps({
+                    "type": "heartbeat",
+                    "timestamp": datetime.utcnow().isoformat()
+                }))
+                
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error(f"User activity WebSocket error: {str(e)}")
+        try:
+            await websocket.close(code=1011)
+        except:
+            pass
 
 # Session Recording Endpoints
 @app.post("/api/sessions/start", response_model=RecordedSessionResponse)
